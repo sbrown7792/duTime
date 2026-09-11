@@ -7,7 +7,6 @@
 use crate::api::AppState;
 use crate::config::Config;
 use crate::scan::walker::{ScanOptions, scan};
-use crate::store::Store;
 use crate::store::commit::{CommitOptions, commit_scan};
 use anyhow::Result;
 use std::sync::Arc;
@@ -133,10 +132,6 @@ impl Scheduler {
         })
         .await??;
 
-        // The newest snapshot is now stale; historical ones are immutable, but
-        // clearing everything is cheap and leaves no room for a staleness bug.
-        self.state.invalidate();
-
         tracing::info!(
             root = %root.path.display(),
             scan = stats.scan_id,
@@ -151,12 +146,16 @@ impl Scheduler {
 }
 
 pub async fn serve(cfg: Config) -> Result<()> {
-    let store = Store::open(&cfg.db)?;
-    for r in &cfg.roots {
-        let canon = r.path.canonicalize().unwrap_or_else(|_| r.path.clone());
-        store.ensure_root(&canon)?;
+    // A writer plus a pool of readers, so the web UI never queues behind the
+    // scanner's commit.
+    let state = Arc::new(AppState::open(&cfg.db)?);
+    {
+        let store = state.store.lock().unwrap();
+        for r in &cfg.roots {
+            let canon = r.path.canonicalize().unwrap_or_else(|_| r.path.clone());
+            store.ensure_root(&canon)?;
+        }
     }
-    let state = Arc::new(AppState::new(store));
 
     let sched = Arc::new(Scheduler::new(state.clone(), cfg.clone()));
     sched.spawn_all();

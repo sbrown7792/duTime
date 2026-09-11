@@ -45,6 +45,16 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn load(store: &Store, root_id: RootId, scan_id: ScanId) -> Result<Self> {
+        // Every statement below must see the same database.
+        //
+        // Without a transaction they do not: `load_own` asks whether this is
+        // the latest scan and then reads `current_size`, and a commit landing
+        // between those two queries yields a tree labelled with one scan but
+        // holding the next one's sizes. Narrow, silent, and permanent once
+        // cached. A deferred read transaction pins one consistent view; under
+        // WAL it blocks nothing.
+        let tx = store.conn.unchecked_transaction()?;
+
         let started_at: i64 = store
             .conn
             .query_row("SELECT started_at FROM scan WHERE scan_id = ?1", params![scan_id], |r| {
@@ -117,6 +127,8 @@ impl Snapshot {
         s.own_files = vec![0; n];
         s.load_own(store, root_id, scan_id)?;
         s.rollup();
+        // Read-only: rolling back is both correct and cheaper than committing.
+        drop(tx);
         Ok(s)
     }
 

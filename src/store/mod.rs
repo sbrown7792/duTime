@@ -28,6 +28,26 @@ pub struct Store {
     pub conn: Connection,
 }
 
+/// Connection settings, applied identically to the writer and every reader.
+///
+/// `synchronous=NORMAL` rather than FULL: with WAL that is durable against a
+/// process crash and can only lose the last transaction to a power cut. For
+/// disk-usage samples taken every few minutes that is the right trade — the
+/// alternative is an fsync per commit forever, to protect a data point the
+/// next scan reproduces anyway.
+fn apply_pragmas(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "busy_timeout", 10_000)?;
+    conn.pragma_update(None, "wal_autocheckpoint", 2000)?;
+    conn.pragma_update(None, "cache_size", -65_536)?; // 64 MiB
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    conn.pragma_update(None, "mmap_size", 1_073_741_824i64)?;
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -46,27 +66,28 @@ impl Store {
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
-        // WAL so a long read (the web UI drawing a treemap) never blocks the
-        // scanner's commit, and vice versa.
-        //
-        // synchronous=NORMAL rather than FULL: with WAL that is durable against
-        // process crash and can only lose the last transaction to a power cut.
-        // For disk-usage samples taken every few minutes that is the right
-        // trade — the alternative is an fsync per commit forever, to protect a
-        // data point that the next scan reproduces anyway.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "busy_timeout", 10_000)?;
-        conn.pragma_update(None, "wal_autocheckpoint", 2000)?;
-        conn.pragma_update(None, "cache_size", -65_536)?; // 64 MiB
-        conn.pragma_update(None, "temp_store", "MEMORY")?;
-        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
-        conn.pragma_update(None, "mmap_size", 1_073_741_824i64)?;
-
+        apply_pragmas(&conn)?;
         let mut s = Self { conn };
         s.migrate()?;
         Ok(s)
+    }
+
+    /// Open an additional connection for reading.
+    ///
+    /// WAL lets any number of readers run concurrently with the single writer,
+    /// neither blocking the other — but only across *separate connections*.
+    /// Sharing one connection behind a mutex throws that away and serializes
+    /// the web UI behind the scanner's commit.
+    ///
+    /// Deliberately not opened `SQLITE_OPEN_READ_ONLY`: a read-only connection
+    /// to a WAL database still needs to write the `-shm` index, which turns a
+    /// perfectly ordinary setup into a confusing "attempt to write a readonly
+    /// database" at runtime. Nothing in the API layer issues a write.
+    pub fn open_reader(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open(path.as_ref())
+            .with_context(|| format!("opening database {}", path.as_ref().display()))?;
+        apply_pragmas(&conn)?;
+        Ok(Self { conn })
     }
 
     /// Forward-only migrations keyed on `meta.schema_version`.
