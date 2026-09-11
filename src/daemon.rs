@@ -137,6 +137,7 @@ impl Scheduler {
         let examples = r.stats.unreadable.clone();
         let skipped = r.stats.skipped_mounts.clone();
         let other_fs = r.stats.other_filesystems.clone();
+        let root_fstype = r.stats.root_fstype.clone();
         let n_entities = r.tree.len();
         let n_dirs = r.stats.n_dirs;
 
@@ -204,7 +205,15 @@ impl Scheduler {
             );
         }
 
-        explain_empty_scan(&root.path, n_entities, n_dirs, n_errors, &other_fs, &opts);
+        explain_empty_scan(
+            &root.path,
+            n_entities,
+            n_dirs,
+            n_errors,
+            &other_fs,
+            root_fstype.as_deref(),
+            &opts,
+        );
         if n_errors > 0 {
             tracing::warn!(
                 root = %root.path.display(),
@@ -215,6 +224,7 @@ impl Scheduler {
                 examples.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
                 if n_errors > examples.len() as i64 { ", ..." } else { "" }
             );
+            tracing::warn!("{}", permission_advice(root_fstype.as_deref()));
         }
         Ok(())
     }
@@ -459,6 +469,7 @@ fn explain_empty_scan(
     n_dirs: i64,
     n_errors: i64,
     other_fs: &[std::path::PathBuf],
+    root_fstype: Option<&str>,
     opts: &ScanOptions,
 ) {
     // A root holding only itself, or a couple of directories and no tracked
@@ -479,6 +490,7 @@ fn explain_empty_scan(
 
     if n_errors > 0 {
         tracing::warn!("  - {n_errors} path(s) could not be read (see the warning below)");
+        tracing::warn!("    {}", permission_advice(root_fstype));
     } else {
         // Worth stating explicitly: it removes the most-suspected cause.
         tracing::warn!(
@@ -537,4 +549,77 @@ fn explain_empty_scan(
          sudo -u dutime dutime scan {} --dry-run",
         root.display()
     );
+}
+
+/// What to do about an unreadable path, which depends on where it lives.
+///
+/// The generic advice — "grant CAP_DAC_READ_SEARCH, the system unit already
+/// does" — is correct on a local filesystem and **useless on a network one**.
+/// On NFS with `sec=sys` the client sends a numeric uid and gid and the
+/// server decides; it cannot see a client capability, so granting one changes
+/// nothing. Worse, `root_squash` is the default almost everywhere, so running
+/// as root maps to `nobody` and reads *less* than an ordinary user.
+///
+/// Sending someone to check a capability that was never going to help costs
+/// them an afternoon, so the filesystem type picks the message.
+fn permission_advice(root_fstype: Option<&str>) -> String {
+    match root_fstype {
+        Some(fs) if crate::scan::mounts::is_server_authorized(fs) => format!(
+            "this root is on {fs}, where permissions are enforced by the SERVER against the \
+             uid/gid duTime presents — CAP_DAC_READ_SEARCH does nothing here, and root_squash \
+             means running as root reads less, not more. Fix it by making the uid match: run \
+             duTime as the user that owns the files, or grant that uid access on the server \
+             (for a mode-700 directory, no group or capability will do)."
+        ),
+        Some(fs) => format!(
+            "this root is on {fs} (a local filesystem), so CAP_DAC_READ_SEARCH does grant \
+             read and traverse on everything. Check it with: systemctl show dutime -p \
+             AmbientCapabilities — an empty value means the --user unit, which has none."
+        ),
+        None => "could not determine this root's filesystem type, so cannot say whether \
+             CAP_DAC_READ_SEARCH would help (it does on local filesystems, and does nothing \
+             on NFS/SMB, where the server checks the uid)."
+            .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod advice_tests {
+    use super::*;
+
+    /// The NFS branch cannot be reached by a test that has no NFS server, so
+    /// the message itself is pinned here instead. What it must never do is
+    /// tell someone to grant a capability that cannot work.
+    #[test]
+    fn a_network_filesystem_is_not_sent_to_check_capabilities() {
+        for fs in ["nfs", "nfs4", "cifs", "smb3", "ceph", "afs"] {
+            let a = permission_advice(Some(fs));
+            assert!(a.contains("SERVER"), "{fs}: {a}");
+            assert!(a.contains("uid"), "{fs}: {a}");
+            assert!(
+                a.contains("CAP_DAC_READ_SEARCH does nothing"),
+                "{fs} was not told the capability is useless: {a}"
+            );
+            assert!(a.contains("root_squash"), "{fs}: {a}");
+        }
+    }
+
+    #[test]
+    fn a_local_filesystem_is_told_the_capability_helps() {
+        for fs in ["ext4", "btrfs", "xfs", "zfs", "vfat"] {
+            let a = permission_advice(Some(fs));
+            assert!(a.contains("does grant"), "{fs}: {a}");
+            assert!(a.contains("AmbientCapabilities"), "{fs}: {a}");
+            assert!(!a.contains("SERVER"), "{fs} got the network advice: {a}");
+        }
+    }
+
+    /// Saying nothing confidently is better than saying the wrong thing.
+    #[test]
+    fn an_unknown_filesystem_hedges_rather_than_guesses() {
+        let a = permission_advice(None);
+        assert!(a.contains("could not determine"), "{a}");
+        // It still has to mention both cases, or it is no help at all.
+        assert!(a.contains("local") && a.contains("NFS"), "{a}");
+    }
 }

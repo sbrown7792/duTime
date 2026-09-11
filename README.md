@@ -293,11 +293,25 @@ use an SSH tunnel.
 
 ### Reading directories duTime does not own
 
-**Do not run it as root.** The system unit already grants
-`CAP_DAC_READ_SEARCH`, which bypasses read and traverse checks on the whole
-filesystem and grants nothing else — no write, no chown, no module loading.
-A `chmod 700` directory owned by another user is readable with it, and root
-would add only the ability to damage something.
+**On a local filesystem, do not run it as root.** The system unit already
+grants `CAP_DAC_READ_SEARCH`, which bypasses read and traverse checks and
+grants nothing else — no write, no chown, no module loading. A `chmod 700`
+directory owned by another user is readable with it, and root would add only
+the ability to damage something.
+
+**On NFS, SMB or another network share, that capability does nothing at all.**
+The check happens on the *server*, against the numeric uid and gid the client
+presents — `sec=sys` sends exactly that and nothing else — and the server
+cannot see a capability held by a process on your machine. `root_squash` is
+the default on nearly every export, so running as root maps to `nobody` and
+reads *less* than an ordinary user. The only thing that helps is making the
+uid match: run duTime as the user that owns the files, or grant duTime's uid
+access on the server. For a mode-700 directory no group membership will do
+it either, since 700 grants nothing to the group.
+
+duTime works this out for itself: it records the filesystem type of each root
+and the permission advice it prints names that type, so you are never sent to
+check a capability that could not have helped.
 
 ```console
 $ systemctl show dutime -p AmbientCapabilities

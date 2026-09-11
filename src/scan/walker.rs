@@ -110,6 +110,11 @@ pub struct ScanStats {
     /// nowhere, which made "no mount was skipped" a thing duTime could say
     /// while a whole filesystem sat unscanned under the root.
     pub other_filesystems: Vec<PathBuf>,
+    /// The filesystem type the root sits on, from `/proc/self/mountinfo`.
+    ///
+    /// Recorded because it changes what an unreadable path *means*, and so
+    /// what to do about one. See [`crate::scan::mounts::is_server_authorized`].
+    pub root_fstype: Option<String>,
 }
 
 /// Enough crossings to name the drive; not so many that a nest of mounts
@@ -148,10 +153,11 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
     let root_meta = std::fs::symlink_metadata(&root)?;
     let root_dev = root_meta.dev();
 
+    let mounts = MountTable::load();
+    let root_fstype =
+        mounts.as_ref().ok().and_then(|mt| mt.find_mount_for(&root)).map(|e| e.fstype.clone());
     let skip: std::collections::HashSet<PathBuf> = if opts.one_filesystem {
-        MountTable::load()
-            .map(|mt| mt.skip_set(root_dev, &root))
-            .unwrap_or_default()
+        mounts.as_ref().map(|mt| mt.skip_set(root_dev, &root)).unwrap_or_default()
     } else {
         Default::default()
     };
@@ -174,6 +180,7 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
     out.stats.n_errors = w.n_errors;
     out.stats.unreadable = w.unreadable;
     out.stats.other_filesystems = w.other_filesystems;
+    out.stats.root_fstype = root_fstype;
     Ok(out)
 }
 

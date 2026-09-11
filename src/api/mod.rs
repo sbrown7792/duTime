@@ -307,7 +307,7 @@ async fn overview(
         let metric = metric_of(&q.metric);
         let (scan_id, at) = s.pick_scan(root, &q.at)?;
 
-        let (path, first, total_scans, fs, partial, history) = {
+        let (path, first, total_scans, fs, partial, fstype, history) = {
             let store = s.read();
             let path = store.root_path(root)?;
             let first = store.first_scan(root)?;
@@ -325,6 +325,12 @@ async fn overview(
                 [scan_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            // What to do about an unreadable path depends on where it lives,
+            // so resolve the root's filesystem now rather than letting the UI
+            // offer advice that cannot work on a network share.
+            let fstype = crate::scan::mounts::MountTable::load()
+                .ok()
+                .and_then(|mt| mt.find_mount_for(&path).map(|e| e.fstype.clone()));
             let mut st = store.conn.prepare(&format!(
                 "SELECT started_at, incl_bytes, incl_blocks, fs_free FROM scan
                  WHERE root_id = ?1 AND {USABLE_SCAN} ORDER BY scan_id"
@@ -338,7 +344,7 @@ async fn overview(
                 ))
             })?;
             let history: Vec<(i64, i64, i64, Option<i64>)> = rows.collect::<rusqlite::Result<_>>()?;
-            (path, first, total, fs, partial, history)
+            (path, first, total, fs, partial, fstype, history)
         };
 
         let series: Vec<Value> = history
@@ -412,6 +418,8 @@ async fn overview(
             "forecast": forecast,
             "scan_status": partial.0,
             "scan_error": partial.1,
+            "fstype": fstype,
+            "server_authorized": fstype.as_deref().is_some_and(crate::scan::mounts::is_server_authorized),
         }))
     })
     .await

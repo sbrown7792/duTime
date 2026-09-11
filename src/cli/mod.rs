@@ -1114,6 +1114,7 @@ fn cmd_config_check(path: &Path) -> Result<()> {
         anyhow::bail!("config tracks nothing");
     }
 
+    let mounts = crate::scan::mounts::MountTable::load();
     println!("\n{} root(s):", cfg.roots.len());
     for r in &cfg.roots {
         let exists = r.path.is_dir();
@@ -1126,6 +1127,21 @@ fn cmd_config_check(path: &Path) -> Result<()> {
             std::time::Duration::from_secs(r.interval_s)
         ));
         println!("    {:<22} {}", "track files over", ByteSize(r.track_file_min_bytes as u64));
+        // The filesystem type decides what an unreadable path means here, so
+        // it belongs next to the root rather than only in a scan warning.
+        if let Some(e) = mounts.as_ref().ok().and_then(|mt| mt.find_mount_for(&r.path)) {
+            let server = crate::scan::mounts::is_server_authorized(&e.fstype);
+            println!(
+                "    {:<22} {}{}",
+                "filesystem",
+                e.fstype,
+                if server {
+                    "  — the SERVER checks permissions against duTime's uid;                      CAP_DAC_READ_SEARCH does not apply"
+                } else {
+                    ""
+                }
+            );
+        }
         println!("    {:<22} {}", "one filesystem", r.one_filesystem);
         println!(
             "    {:<22} {}",

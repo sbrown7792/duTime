@@ -89,6 +89,32 @@ function toast(msg) {
   toast._t = setTimeout(() => t.classList.remove('on'), 5000);
 }
 
+/* What to do about an unreadable path, which depends on where it lives.
+ *
+ * On a local filesystem the kernel checks permissions, so CAP_DAC_READ_SEARCH
+ * bypasses them. On NFS or SMB the *server* checks, against the numeric uid
+ * duTime presents, and cannot see a client capability — so the usual advice
+ * is not merely unhelpful there, it sends you to verify something that was
+ * never going to work.
+ */
+function permissionAdvice(o) {
+  if (o.server_authorized) {
+    return `This root is on <b>${escapeHtml(o.fstype)}</b>, where the server enforces `
+      + 'permissions against the uid duTime presents. A capability on this machine '
+      + 'changes nothing, and root_squash means running as root reads less, not more. '
+      + 'Make the uid match: run duTime as the user that owns the files, or grant that '
+      + 'uid access on the server.';
+  }
+  if (o.fstype) {
+    return `This root is on <b>${escapeHtml(o.fstype)}</b>, a local filesystem, so `
+      + 'CAP_DAC_READ_SEARCH does grant read and traverse on everything. The system unit '
+      + 'sets it; the --user unit deliberately has none.';
+  }
+  return 'Run duTime with CAP_DAC_READ_SEARCH (the system unit does) to read directories '
+    + 'it does not own — unless this root is on a network share, where the server checks '
+    + 'the uid instead and capabilities do not apply.';
+}
+
 // ── sign-in ────────────────────────────────────────────────────────────
 
 /* The token lives in localStorage and rides on an Authorization header.
@@ -322,8 +348,7 @@ async function loadOverview() {
          every total below is lower than the truth. Growth trends are still
          meaningful when the same paths fail each time.
          ${o.scan_error ? `<div class="detail">${escapeHtml(o.scan_error)}</div>` : ''}
-         <div class="detail">Run duTime with CAP_DAC_READ_SEARCH (the system unit
-         does) to read directories it does not own.</div>
+         <div class="detail">${permissionAdvice(o)}</div>
        </div>`
     : '';
 

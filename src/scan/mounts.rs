@@ -33,6 +33,26 @@ pub const DENY_FSTYPES: &[&str] = &[
 /// Fstype prefixes that are denied along with any suffix (`fuse.*`, `nfs4`, …).
 const DENY_PREFIXES: &[&str] = &["fuse.", "nfs", "cifs", "smb", "ceph", "glusterfs", "afs"];
 
+/// Filesystems where the *server* decides what you may read.
+///
+/// This distinction matters more than it looks. On a local filesystem the
+/// kernel performs the permission check, so `CAP_DAC_READ_SEARCH` bypasses
+/// it and duTime can read anything. On these, authorization happens at the
+/// other end of a network connection against the numeric uid/gid the client
+/// presents — NFS `sec=sys` sends exactly that and nothing else. The server
+/// has no idea the client process holds a capability, so the capability buys
+/// nothing at all, and `root_squash` (on by default nearly everywhere) means
+/// running as root is actively worse than running as a normal user.
+///
+/// Getting this wrong sends someone to check capabilities that were never
+/// going to help, so duTime names the filesystem type instead.
+pub const SERVER_AUTHORIZED_FSTYPES: &[&str] = &["nfs", "cifs", "smb", "ceph", "afs", "glusterfs"];
+
+/// Does this filesystem type do its permission checks on a remote server?
+pub fn is_server_authorized(fstype: &str) -> bool {
+    SERVER_AUTHORIZED_FSTYPES.iter().any(|p| fstype.starts_with(p))
+}
+
 /// One line of `/proc/self/mountinfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountEntry {
@@ -260,5 +280,45 @@ mod tests {
     fn unescapes_octal_sequences() {
         assert_eq!(unescape("/mnt/my\\040disk"), "/mnt/my disk");
         assert_eq!(unescape("/plain/path"), "/plain/path");
+    }
+}
+
+#[cfg(test)]
+mod nfs_tests {
+    use super::*;
+
+    /// `nfs4` is on the denylist so that a scan of `/` does not wander onto a
+    /// NAS and hang. But a root the operator configured *is* the NAS, and an
+    /// explicit request must win over a blanket rule — otherwise duTime
+    /// silently records the mount point and nothing under it.
+    #[test]
+    fn an_nfs_root_is_still_walked_when_it_is_the_root() {
+        let raw = "\
+36 25 0:52 / /media/nextcloud rw,relatime shared:1 - nfs4 192.168.0.250:/volume1/nextcloud rw
+25 1 259:2 / / rw,relatime shared:2 - ext4 /dev/nvme0n1p2 rw";
+        let mt = MountTable::parse(raw);
+        let nfs = mt.entries.iter().find(|e| e.fstype == "nfs4").unwrap();
+        assert!(nfs.fstype_denied(), "nfs4 should be denied in general");
+
+        let root = Path::new("/media/nextcloud");
+        let skip = mt.skip_set(nfs.dev_id(), root);
+        assert!(
+            !skip.contains(root),
+            "the configured root was skipped because of its own filesystem type: {skip:?}"
+        );
+        assert!(skip.is_empty(), "nothing under this root should be skipped: {skip:?}");
+    }
+
+    /// The same mount reached while scanning `/` must still be skipped: that
+    /// is a walk across the network nobody asked for.
+    #[test]
+    fn the_same_nfs_mount_is_skipped_when_scanning_slash() {
+        let raw = "\
+36 25 0:52 / /media/nextcloud rw,relatime shared:1 - nfs4 192.168.0.250:/volume1/nextcloud rw
+25 1 259:2 / / rw,relatime shared:2 - ext4 /dev/nvme0n1p2 rw";
+        let mt = MountTable::parse(raw);
+        let ext4 = mt.entries.iter().find(|e| e.fstype == "ext4").unwrap();
+        let skip = mt.skip_set(ext4.dev_id(), Path::new("/"));
+        assert!(skip.contains(Path::new("/media/nextcloud")), "{skip:?}");
     }
 }
