@@ -59,15 +59,15 @@ pub enum Cmd {
     /// Size of a path, optionally as it was at some past moment.
     Du {
         path: PathBuf,
-        /// RFC3339, a relative offset like -24h or -7d, or scan:<id>.
-        #[arg(long, default_value = "now")]
+        /// RFC3339, a relative offset like -24h or 7d, or scan:<id>.
+        #[arg(long, default_value = "now", allow_hyphen_values = true)]
         at: String,
     },
 
     /// What grew (or shrank) over a window.
     Top {
         /// Window length, e.g. 24h, 7d.
-        #[arg(long, default_value = "24h")]
+        #[arg(long, default_value = "24h", allow_hyphen_values = true)]
         since: String,
         /// Restrict to a subtree.
         #[arg(long)]
@@ -93,8 +93,53 @@ pub enum Cmd {
         limit: i64,
     },
 
+    /// Run the service: scheduled scans plus the web UI.
+    Serve {
+        /// Config file. Without one, duTime tracks $HOME hourly on
+        /// 127.0.0.1:8471.
+        #[arg(long, short)]
+        config: Option<PathBuf>,
+        /// Override the listen address.
+        #[arg(long, short)]
+        listen: Option<std::net::SocketAddr>,
+        /// Track this path instead of whatever the config says. Repeatable.
+        #[arg(long)]
+        root: Vec<PathBuf>,
+        /// Seconds between scans, when --root is given.
+        #[arg(long, default_value = "3600", value_parser = parse_duration_arg)]
+        interval: u64,
+        /// Do not scan immediately on startup.
+        #[arg(long)]
+        no_initial_scan: bool,
+    },
+
+    /// Print a commented starter configuration.
+    Config,
+
+    /// Write a systemd unit and a starter config.
+    Install {
+        /// Install for the current user only: no root, no capabilities, and
+        /// it can only see what you can already read.
+        #[arg(long, conflicts_with = "system")]
+        user: bool,
+        /// Install system-wide. Runs as a dedicated unprivileged `dutime`
+        /// user holding only CAP_DAC_READ_SEARCH -- never as root.
+        #[arg(long)]
+        system: bool,
+        /// Paths to track. Defaults to $HOME for --user, / for --system.
+        #[arg(long)]
+        root: Vec<PathBuf>,
+        /// Print what would be written and exit.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Check the database for internal inconsistency.
     Doctor,
+}
+
+fn parse_duration_arg(s: &str) -> Result<u64, String> {
+    timespec::parse_duration(s).map(|v| v as u64).map_err(|e| e.to_string())
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -185,6 +230,43 @@ pub fn run(cli: Cli) -> Result<()> {
             !no_collapse,
         ),
         Cmd::Scans { limit } => cmd_scans(&db_path, &fmt, limit),
+        Cmd::Config => {
+            print!("{}", crate::config::Config::sample());
+            Ok(())
+        }
+        Cmd::Install { user, system, root, dry_run } => cmd_install(user, system, root, dry_run),
+        Cmd::Serve { config, listen, root, interval, no_initial_scan } => {
+            let mut cfg = crate::config::Config::load(config.as_deref())?;
+            if let Some(db) = cli.db {
+                cfg.db = db;
+            }
+            if let Some(l) = listen {
+                cfg.listen = l;
+            }
+            if !root.is_empty() {
+                cfg.roots = root
+                    .into_iter()
+                    .map(|path| crate::config::RootConfig {
+                        path,
+                        interval_s: interval,
+                        ..Default::default()
+                    })
+                    .collect();
+            }
+            if no_initial_scan {
+                cfg.scan_on_start = false;
+            }
+            if cfg.roots.is_empty() {
+                anyhow::bail!(
+                    "no roots to track — pass --root <path>, or set $HOME, or write a config \
+                     (see `dutime config`)"
+                );
+            }
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(crate::daemon::serve(cfg))
+        }
         Cmd::Doctor => cmd_doctor(&db_path),
     }
 }
@@ -272,8 +354,9 @@ fn cmd_du(db_path: &Path, fmt: &Fmt, path: &Path, at: &str) -> Result<()> {
         timespec::Target::At(t) => {
             let (id, resolved) = query::resolve_scan(&store, root_id, t)?
                 .context("no scan recorded at or before that time")?;
-            if resolved != t {
-                // Never let the caller believe we have a sample we don't.
+            // Never let the caller believe we have a reading we never took --
+            // but "now" always resolves backwards, so saying so there is noise.
+            if resolved != t && at != "now" {
                 eprintln!("note: nearest scan is {}", fmt_time(resolved));
             }
             id
@@ -457,6 +540,24 @@ fn cmd_doctor(db_path: &Path) -> Result<()> {
             if !ok {
                 problems += 1;
             }
+
+            // The in-RAM snapshot is a third, independent implementation of
+            // the same rollup. If it disagrees with the SQL paths, the web UI
+            // would quietly show different numbers from the CLI.
+            let t0 = std::time::Instant::now();
+            let snap = crate::store::snapshot::Snapshot::load(&store, root_id, last)?;
+            let load_ms = t0.elapsed().as_millis();
+            let snap_total = snap.root().map(|r| snap.incl_bytes[r as usize]).unwrap_or(-1);
+            let snap_ok = snap_total == recorded;
+            println!(
+                "{:<28} {} ({} entities, loaded in {load_ms} ms)",
+                "in-memory snapshot",
+                if snap_ok { "ok".to_string() } else { format!("MISMATCH {snap_total}") },
+                snap.len()
+            );
+            if !snap_ok {
+                problems += 1;
+            }
         }
     }
 
@@ -553,4 +654,95 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 pub(crate) fn civil_from_days_pub(z: i64) -> (i64, u32, u32) {
     civil_from_days(z)
+}
+
+const USER_UNIT: &str = include_str!("../../packaging/dutime-user.service");
+const SYSTEM_UNIT: &str = include_str!("../../packaging/dutime.service");
+
+/// Write a systemd unit and a starter config.
+///
+/// Deliberately never runs `systemctl` itself. Installing a background service
+/// that will read your whole filesystem is something an administrator should
+/// see coming, so this writes the files, prints the two commands, and stops.
+fn cmd_install(user: bool, system: bool, roots: Vec<PathBuf>, dry_run: bool) -> Result<()> {
+    // Default to whichever mode needs no privilege we do not already have.
+    let user = if user || system { user } else { !rustix::process::geteuid().is_root() };
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let (unit_path, cfg_path, unit, default_root) = if user {
+        (
+            PathBuf::from(&home).join(".config/systemd/user/dutime.service"),
+            PathBuf::from(&home).join(".config/dutime/config.toml"),
+            USER_UNIT,
+            PathBuf::from(&home),
+        )
+    } else {
+        (
+            PathBuf::from("/etc/systemd/system/dutime.service"),
+            PathBuf::from("/etc/dutime/config.toml"),
+            SYSTEM_UNIT,
+            PathBuf::from("/"),
+        )
+    };
+
+    let roots = if roots.is_empty() { vec![default_root] } else { roots };
+
+    // Start from the commented sample, then replace its example root blocks
+    // with the ones actually requested.
+    let mut cfg = crate::config::Config::sample();
+    if let Some(cut) = cfg.find("[[root]]") {
+        cfg.truncate(cut);
+    }
+    let excludes = crate::config::default_excludes()
+        .iter()
+        .map(|e| format!("{e:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for r in &roots {
+        cfg.push_str(&format!(
+            "[[root]]\npath = {:?}\ninterval_s = 3600\none_filesystem = true\n\
+             track_file_min_bytes = 1048576\nexclude = [{}]\n\n",
+            r.display().to_string(),
+            excludes
+        ));
+    }
+
+    println!("{:<12} {}", "mode", if user { "user (no privilege)" } else { "system (CAP_DAC_READ_SEARCH)" });
+    println!("{:<12} {}", "unit", unit_path.display());
+    println!("{:<12} {}", "config", cfg_path.display());
+    for r in &roots {
+        println!("{:<12} {}", "tracking", r.display());
+    }
+
+    if dry_run {
+        println!("\n----- {} -----\n{unit}", unit_path.display());
+        println!("----- {} -----\n{cfg}", cfg_path.display());
+        println!("(nothing written: --dry-run)");
+        return Ok(());
+    }
+
+    for p in [&unit_path, &cfg_path] {
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+        }
+    }
+    // Never clobber an existing config: it is the one file with local edits.
+    if cfg_path.exists() {
+        println!("\nkept existing config: {}", cfg_path.display());
+    } else {
+        std::fs::write(&cfg_path, &cfg)
+            .with_context(|| format!("writing {}", cfg_path.display()))?;
+    }
+    std::fs::write(&unit_path, unit)
+        .with_context(|| format!("writing {}", unit_path.display()))?;
+
+    let sc = if user { "systemctl --user" } else { "sudo systemctl" };
+    if !user {
+        println!("\nthe unit runs as a dedicated unprivileged user; create it if needed:");
+        println!("  sudo useradd --system --no-create-home --shell /usr/sbin/nologin dutime");
+    }
+    println!("\nthen:");
+    println!("  {sc} daemon-reload");
+    println!("  {sc} enable --now dutime");
+    Ok(())
 }

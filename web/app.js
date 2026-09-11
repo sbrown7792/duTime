@@ -1,0 +1,725 @@
+/* duTime front end.
+ *
+ * No build step and no framework: a vendored ECharts plus this file. The
+ * service has to keep building on an unattended Ubuntu box years from now,
+ * and an npm toolchain is a permanent tax for no benefit at this size.
+ *
+ * Colour is taken from CSS custom properties rather than hardcoded, so the
+ * validated palette lives in exactly one place and theme switching is a single
+ * re-read.
+ */
+'use strict';
+
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+const state = {
+  root: null,
+  metric: 'apparent',
+  window: '-24h',
+  path: null,
+  scans: [],
+  scanIdx: 0,
+  mode: 'exclusive',
+  dir: 'gainers',
+  collapse: true,
+  view: 'overview',
+  lastChanges: [],
+};
+
+const charts = {};
+
+// ── helpers ────────────────────────────────────────────────────────────
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/** Binary sizes, matching what the CLI prints. */
+function fmtSize(n) {
+  const neg = n < 0;
+  let v = Math.abs(n);
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  const s = i === 0 ? `${v} B` : `${v.toFixed(1)} ${u[i]}`;
+  return neg ? `−${s}` : s;
+}
+
+/** Signed size with an explicit glyph, so growth never reads by colour alone. */
+function fmtDelta(n) {
+  if (n === 0) return '0';
+  return (n > 0 ? '+' : '−') + fmtSize(Math.abs(n));
+}
+
+function fmtTime(epoch) {
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function fmtDate(epoch) {
+  return new Date(epoch * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove('on'), 5000);
+}
+
+async function api(path, params = {}) {
+  const q = new URLSearchParams();
+  if (state.root != null) q.set('root', state.root);
+  q.set('metric', state.metric);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null) q.set(k, v);
+  }
+  const r = await fetch(`/api/v1/${path}?${q}`);
+  const j = await r.json().catch(() => ({ error: `${r.status} ${r.statusText}` }));
+  if (!r.ok) throw new Error(j.error || `request failed: ${r.status}`);
+  return j;
+}
+
+/** Choose an axis max and tick interval on binary boundaries.
+ *
+ * Sizes are powers of two, but a linear axis picks round *decimal* values, so
+ * the ticks come out as "953.7 MiB" and "762.9 MiB" — technically correct and
+ * unreadable. Stepping on 1/2/5 x a binary unit gives "256 MiB", "512 MiB".
+ */
+function binaryAxis(maxValue) {
+  if (!(maxValue > 0)) return {};
+  let unit = 1;
+  while (maxValue / unit >= 1024 && unit < 1024 ** 5) unit *= 1024;
+  // Drop a unit when the value only just clears it, so 1.2 GiB is stepped in
+  // MiB (256/512/768/1024) rather than getting one tick at 1 GiB and a 2 GiB
+  // ceiling with nothing in between.
+  if (maxValue / unit < 4 && unit > 1) unit /= 1024;
+  const steps = [1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 50, 64, 100, 128, 200, 256, 512, 1024];
+  const want = (maxValue / unit) / 4;             // aim for ~4-5 ticks
+  const step = steps.find((x) => x >= want) ?? 1024;
+  const interval = step * unit;
+  return { max: Math.ceil(maxValue / interval) * interval, interval };
+}
+
+/** Shared ECharts chrome: hairline grid, recessive axes, muted ink. */
+function baseOption() {
+  return {
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
+    animationDuration: 260,
+    grid: { left: 68, right: 22, top: 18, bottom: 34, containLabel: false },
+    xAxis: {
+      type: 'time',
+      axisLine: { lineStyle: { color: cssVar('--axis'), width: 1 } },
+      axisTick: { show: false },
+      axisLabel: { color: cssVar('--text-muted'), fontSize: 11, hideOverlap: true },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: cssVar('--text-muted'), fontSize: 11, formatter: fmtSize },
+      splitLine: { lineStyle: { color: cssVar('--grid'), width: 1, type: 'solid' } },
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis'), width: 1 } },
+      backgroundColor: cssVar('--surface-1'),
+      borderColor: cssVar('--border'),
+      textStyle: { color: cssVar('--text-primary'), fontSize: 12 },
+      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;',
+    },
+  };
+}
+
+function chart(id) {
+  if (!charts[id]) charts[id] = echarts.init($('#' + id), null, { renderer: 'canvas' });
+  return charts[id];
+}
+
+function seriesColors() {
+  return ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8'].map(cssVar);
+}
+
+// ── overview ───────────────────────────────────────────────────────────
+
+async function loadOverview() {
+  const o = await api('overview');
+  state.rootPath = o.path.name;
+
+  const used = o.history.length ? o.history[o.history.length - 1][1] : 0;
+  const free = o.fs.free;
+  const total = o.fs.total;
+  const pct = total ? Math.round(((total - free) / total) * 100) : null;
+
+  const tiles = [
+    { k: 'Tracked size', v: fmtSize(used), m: o.path.name },
+    {
+      k: 'Filesystem', v: pct != null ? `${pct}% full` : '—',
+      m: total ? `${fmtSize(free)} free of ${fmtSize(total)}` : 'not recorded',
+      cls: pct != null && pct >= 90 ? 'warn' : '',
+    },
+    forecastTile(o.forecast),
+    {
+      k: 'Samples', v: String(o.scans),
+      m: o.first_scan ? `since ${fmtTime(o.first_scan.at)}` : '—',
+    },
+  ];
+  $('#tiles').innerHTML = tiles.map((t) => `
+    <div class="tile">
+      <div class="k">${t.k}</div>
+      <div class="v">${t.v}</div>
+      <div class="m ${t.cls || ''}">${t.m}</div>
+    </div>`).join('');
+
+  // One series, so no legend: the caption names it.
+  const c = chart('usedChart');
+  const pts = o.history.map(([t, b]) => [t * 1000, b]);
+  const opt = baseOption();
+  opt.grid.top = 26;
+  Object.assign(opt.yAxis, binaryAxis(Math.max(...pts.map((p) => p[1]), 0)));
+  opt.series = [{
+    type: 'line', name: 'Tracked size', data: pts,
+    showSymbol: false, symbolSize: 8,
+    lineStyle: { width: 2, color: cssVar('--s1') },
+    areaStyle: { color: cssVar('--s1'), opacity: 0.10 },
+    emphasis: { focus: 'series' },
+  }];
+  opt.tooltip.formatter = (ps) => {
+    const p = ps[0];
+    return `<b>${fmtTime(p.value[0] / 1000)}</b><br>${fmtSize(p.value[1])}`;
+  };
+  c.setOption(opt, true);
+
+  $('#usedSub').textContent = o.scans < 2
+    ? 'Only one sample so far — a trend appears once duTime has scanned a few times.'
+    : `${o.scans} samples since ${fmtTime(o.first_scan.at)}.`;
+
+  await loadGainers('#gainTable', 8);
+}
+
+function forecastTile(f) {
+  if (!f || f.status === 'insufficient_history') {
+    const n = f && f.needs;
+    const m = n
+      ? `needs ${n.samples} samples over ${n.span_hours}h — have ${n.have_samples} over ${n.have_span_hours.toFixed(1)}h`
+      : 'needs more samples';
+    return { k: 'Projected full in', v: 'not yet', m };
+  }
+  if (f.trend_bytes_per_day == null) {
+    return { k: 'Trend', v: '—', m: 'needs more samples' };
+  }
+  const perDay = f.trend_bytes_per_day;
+  if (f.days_to_full == null) {
+    return { k: 'Free space trend', v: 'stable', m: `${fmtDelta(Math.round(perDay))}/day`, cls: 'good' };
+  }
+  const d = f.days_to_full;
+  const v = d < 1 ? 'under a day' : d < 400 ? `~${Math.round(d)} days` : 'over a year';
+  return {
+    k: 'Projected full in', v,
+    m: `${fmtDelta(Math.round(perDay))}/day of free space`,
+    cls: d < 30 ? 'warn' : '',
+  };
+}
+
+// ── gainers table ──────────────────────────────────────────────────────
+
+async function loadGainers(sel, limit) {
+  const g = await api('gainers', {
+    from: state.window, mode: state.mode,
+    limit, losers: state.dir === 'losers', collapse: state.collapse,
+  });
+  state.lastChanges = g.results;
+
+  const el = $(sel);
+  if (!g.results.length) {
+    el.innerHTML = `<div class="empty">Nothing ${state.dir === 'losers' ? 'shrank' : 'grew'} in this window.</div>`;
+  } else {
+    const rows = g.results.map((r) => `
+      <tr>
+        <td class="num ${r.delta > 0 ? 'up' : 'down'}">${fmtDelta(r.delta)}</td>
+        <td class="path">${escapeHtml(r.path.name)}${r.path.lossy ? ' <span title="filename is not valid UTF-8">⚠</span>' : ''}</td>
+      </tr>`).join('');
+    el.innerHTML = `<table><thead><tr><th class="num">Change</th><th>Path</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  const note = g.window_clamped_to_first_scan
+    ? ` Tracking only began at ${fmtTime(g.from.at)}, so this covers less than the window asked for.`
+    : '';
+  const sub = $('#gainSub');
+  if (sub && sel === '#gainTable') {
+    sub.textContent = `Between ${fmtTime(g.from.at)} and ${fmtTime(g.to.at)}.${note}`;
+  }
+  return g;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ── explorer ───────────────────────────────────────────────────────────
+
+async function loadScans() {
+  const s = await api('scans', { limit: 2000 });
+  state.scans = s.scans;
+  const sl = $('#timeSlider');
+  sl.max = Math.max(0, state.scans.length - 1);
+  if (state.scanIdx > sl.max) state.scanIdx = sl.max;
+  sl.value = state.scanIdx;
+  updateTimeLabel();
+
+  const opts = state.scans.map((s, i) =>
+    `<option value="${s.scan_id}">${fmtTime(s.at)}</option>`).join('');
+  $('#diffFrom').innerHTML = opts;
+  $('#diffTo').innerHTML = opts;
+  if (state.scans.length) {
+    const has = (v) => v && state.scans.some((s) => String(s.scan_id) === String(v));
+    $('#diffFrom').value = has(state.diffFrom) ? state.diffFrom : state.scans[0].scan_id;
+    $('#diffTo').value = has(state.diffTo)
+      ? state.diffTo
+      : state.scans[state.scans.length - 1].scan_id;
+  }
+}
+
+function currentScan() {
+  return state.scans[state.scanIdx];
+}
+
+function updateTimeLabel() {
+  const s = currentScan();
+  const isLast = state.scanIdx === state.scans.length - 1;
+  $('#timeLabel').textContent = s ? (isLast ? `now (${fmtTime(s.at)})` : fmtTime(s.at)) : '—';
+}
+
+/** Ordinal blue ramp keyed to nesting depth.
+ *
+ * Depth is genuinely ordered, so an ordinal ramp is the right encoding — and
+ * it keeps the treemap off categorical hues, which would be unreadable here:
+ * treemap tiles touch each other arbitrarily, so every pair of colours would
+ * have to clear the all-pairs CVD floors, and only three of the eight slots do.
+ * Area carries magnitude; the nested rectangles carry hierarchy.
+ */
+function depthColors() {
+  return ['--o1', '--o2', '--o3', '--o4', '--o5'].map(cssVar);
+}
+
+async function loadTreemap() {
+  const s = currentScan();
+  const t = await api('tree', {
+    path: state.path, at: s ? `scan:${s.scan_id}` : 'now', depth: 4, limit: 300,
+  });
+  state.path = t.path.name;
+  renderCrumbs();
+
+  const ramp = depthColors();
+  const paint = (node, d) => {
+    const color = node.kind === 'other' || node.kind === 'own'
+      ? cssVar('--s-other')
+      : ramp[Math.min(d, ramp.length - 1)];
+    const out = {
+      name: node.name, value: node.value, itemStyle: { color },
+      _kind: node.kind, _files: node.files, _lossy: node.lossy,
+    };
+    if (node.children) out.children = node.children.map((c) => paint(c, d + 1));
+    return out;
+  };
+
+  const c = chart('treemap');
+  c.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
+    tooltip: {
+      backgroundColor: cssVar('--surface-1'),
+      borderColor: cssVar('--border'),
+      textStyle: { color: cssVar('--text-primary'), fontSize: 12 },
+      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;',
+      formatter: (p) => {
+        const files = p.data._files != null ? `<br><span style="color:${cssVar('--text-muted')}">${p.data._files.toLocaleString()} files</span>` : '';
+        return `<b>${escapeHtml(p.name)}</b><br>${fmtSize(p.value)}${files}`;
+      },
+    },
+    series: [{
+      type: 'treemap',
+      roam: false,
+      // Squarified layout with a visible gap rather than a stroke: a 2px
+      // surface gap separates fills without adding a border to every mark.
+      squareRatio: 1.618,
+      nodeClick: false,
+      breadcrumb: { show: false },
+      itemStyle: { borderColor: cssVar('--surface-1'), borderWidth: 2, gapWidth: 2 },
+      upperLabel: {
+        show: true, height: 20, color: cssVar('--text-primary'),
+        fontSize: 11, fontWeight: 560, overflow: 'truncate',
+      },
+      label: {
+        show: true, fontSize: 11, color: '#fff', overflow: 'truncate',
+        formatter: (p) => (p.value > 0 ? `${p.name}\n${fmtSize(p.value)}` : p.name),
+      },
+      labelLayout: (p) => ({
+        // Anti-pattern guard: never render a label clipped by its own tile.
+        // Tiny leaves keep their colour and their tooltip; the text goes.
+        fontSize: p.rect && (p.rect.width < 54 || p.rect.height < 20) ? 0 : 11,
+      }),
+
+      levels: [
+        { itemStyle: { borderWidth: 0, gapWidth: 2 } },
+        { itemStyle: { gapWidth: 2 } },
+        { itemStyle: { gapWidth: 1 } },
+        { itemStyle: { gapWidth: 1 } },
+      ],
+      data: (t.node.children || [t.node]).map((n) => paint(n, 1)),
+    }],
+  }, true);
+
+  c.off('click');
+  c.on('click', (p) => {
+    if (!p.data || p.data._kind === 'other' || p.data._kind === 'own') return;
+    const parts = p.treePathInfo.slice(1).map((n) => n.name);
+    state.path = joinPath(t.path.name, parts);
+    loadTreemap();
+    loadSeries();
+  });
+
+  return t;
+}
+
+function joinPath(base, parts) {
+  return parts.length ? base.replace(/\/$/, '') + '/' + parts.join('/') : base;
+}
+
+function renderCrumbs() {
+  const rootPath = state.rootPath || '/';
+  const rel = (state.path || rootPath).slice(rootPath.length).split('/').filter(Boolean);
+  const items = [{ label: rootPath, path: rootPath }];
+  let acc = rootPath;
+  for (const seg of rel) {
+    acc = acc.replace(/\/$/, '') + '/' + seg;
+    items.push({ label: seg, path: acc });
+  }
+  $('#crumbs').innerHTML = items.map((it, i) =>
+    `${i ? '<span class="sep">/</span>' : ''}<button data-path="${escapeHtml(it.path)}">${escapeHtml(it.label)}</button>`
+  ).join('');
+  $$('#crumbs button').forEach((b) => b.addEventListener('click', () => {
+    state.path = b.dataset.path;
+    loadTreemap();
+    loadSeries();
+  }));
+}
+
+async function loadSeries() {
+  let s;
+  try {
+    s = await api('series', { path: state.path, from: state.window, children: 8 });
+  } catch (e) {
+    chart('seriesChart').clear();
+    $('#seriesTable').innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  $('#seriesTitle').textContent = `Composition of ${s.path.name}`;
+
+  const colors = seriesColors();
+  const times = s.times.map((t) => t * 1000);
+  const series = s.bands.map((b, i) => ({
+    name: b.name,
+    type: 'line',
+    stack: 'total',
+    // A 2px surface-coloured line between stacked fills is the gap spec:
+    // separation without drawing a border around every mark.
+    lineStyle: { width: 2, color: cssVar('--surface-1') },
+    areaStyle: { color: b.synthetic ? cssVar('--s-other') : colors[i % 8], opacity: 0.92 },
+    itemStyle: { color: b.synthetic ? cssVar('--s-other') : colors[i % 8] },
+    showSymbol: false,
+    emphasis: { focus: 'series' },
+    data: b.points.map((v, k) => [times[k], v]),
+  }));
+
+  const opt = baseOption();
+  opt.grid.top = 12;
+  opt.grid.bottom = 62;
+  const stackMax = times.length
+    ? Math.max(...times.map((_, k) => s.bands.reduce((a, b) => a + (b.points[k] || 0), 0)))
+    : 0;
+  Object.assign(opt.yAxis, binaryAxis(stackMax));
+  opt.legend = {
+    bottom: 0, type: 'scroll',
+    textStyle: { color: cssVar('--text-secondary'), fontSize: 11 },
+    icon: 'roundRect', itemWidth: 10, itemHeight: 10,
+  };
+  opt.series = series;
+  opt.tooltip.formatter = (ps) => {
+    if (!ps.length) return '';
+    const rows = ps.slice().reverse()
+      .map((p) => `<div style="display:flex;gap:10px"><span style="flex:1">${p.marker} ${escapeHtml(p.seriesName)}</span><b>${fmtSize(p.value[1])}</b></div>`)
+      .join('');
+    return `<b>${fmtTime(ps[0].value[0] / 1000)}</b>${rows}`;
+  };
+  chart('seriesChart').setOption(opt, true);
+
+  // Table view: the accessible twin, and the relief for the light-mode
+  // categorical slots that sit below 3:1 against the surface.
+  const last = (b) => (b.points.length ? b.points[b.points.length - 1] : 0);
+  const first = (b) => (b.points.length ? b.points[0] : 0);
+  $('#seriesTable').innerHTML = `<table><thead><tr>
+      <th>Child</th><th class="num">At start</th><th class="num">Now</th><th class="num">Change</th>
+    </tr></thead><tbody>${s.bands.map((b, i) => {
+      const d = last(b) - first(b);
+      const sw = b.synthetic ? cssVar('--s-other') : colors[i % 8];
+      return `<tr>
+        <td><span class="swatch" style="background:${sw}"></span>${escapeHtml(b.name)}</td>
+        <td class="num">${fmtSize(first(b))}</td>
+        <td class="num">${fmtSize(last(b))}</td>
+        <td class="num ${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${fmtDelta(d)}</td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+}
+
+// ── diff treemap ───────────────────────────────────────────────────────
+
+/** Map a relative change to the diverging ramp.
+ *
+ * Blue <-> red with a neutral grey midpoint, not red/green: red and green are
+ * the classic dichromat trap, while this pair separates by Delta E 20-26 under
+ * both protan and deutan simulation. Lightness also steps monotonically out
+ * from the middle, and every tile carries a signed label, so the reading
+ * survives greyscale printing and colour blindness alike.
+ */
+function divergingColor(delta, before) {
+  if (delta === 0) return cssVar('--d0');
+  const base = Math.max(before, Math.abs(delta), 1);
+  const r = Math.abs(delta) / base;
+  const step = r < 0.05 ? 1 : r < 0.4 ? 2 : 3;
+  return cssVar(delta > 0 ? `--u${step}` : `--d${step}`);
+}
+
+async function loadDiff() {
+  const from = $('#diffFrom').value, to = $('#diffTo').value;
+  if (!from || !to) return;
+  let d;
+  try {
+    d = await api('diff', { from: `scan:${from}`, to: `scan:${to}`, depth: 4, limit: 300 });
+  } catch (e) { toast(e.message); return; }
+
+  const paint = (n) => {
+    const o = {
+      // Area is max(before, after) so a deleted directory still occupies the
+      // space it used to, instead of silently vanishing from the picture.
+      name: n.gone ? `${n.name} (deleted)` : n.name,
+      value: n.value,
+      itemStyle: { color: divergingColor(n.delta, n.before) },
+      _delta: n.delta, _before: n.before, _after: n.after, _gone: n.gone,
+    };
+    if (n.children) o.children = n.children.map(paint);
+    return o;
+  };
+
+  chart('diffmap').setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
+    tooltip: {
+      backgroundColor: cssVar('--surface-1'),
+      borderColor: cssVar('--border'),
+      textStyle: { color: cssVar('--text-primary'), fontSize: 12 },
+      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;',
+      formatter: (p) => `<b>${escapeHtml(p.name)}</b>`
+        + (p.data._gone ? ' <span style="opacity:.7">(deleted)</span>' : '')
+        + `<br>${fmtSize(p.data._before)} → ${fmtSize(p.data._after)}<br>`
+        + `<b>${fmtDelta(p.data._delta)}</b>`,
+    },
+    series: [{
+      type: 'treemap',
+      roam: false, nodeClick: false, squareRatio: 1.618,
+      breadcrumb: { show: false },
+      itemStyle: { borderColor: cssVar('--surface-1'), borderWidth: 2, gapWidth: 2 },
+      upperLabel: { show: true, height: 20, color: cssVar('--text-primary'), fontSize: 11, overflow: 'truncate' },
+      label: {
+        show: true, fontSize: 11, color: cssVar('--text-primary'), overflow: 'truncate',
+        // The signed figure is the secondary encoding: colour is never the
+        // only thing saying which way a tile moved.
+        formatter: (p) => (p.data._delta ? `${p.name}\n${fmtDelta(p.data._delta)}` : p.name),
+      },
+      labelLayout: (p) => ({
+        // Anti-pattern guard: never render a label clipped by its own tile.
+        // Tiny leaves keep their colour and their tooltip; the text goes.
+        fontSize: p.rect && (p.rect.width < 54 || p.rect.height < 20) ? 0 : 11,
+      }),
+
+      data: (d.node.children || [d.node]).map(paint),
+    }],
+  }, true);
+}
+
+// ── wiring ─────────────────────────────────────────────────────────────
+
+async function refresh() {
+  try {
+    if (state.view === 'overview') await loadOverview();
+    else if (state.view === 'explorer') { await loadTreemap(); await loadSeries(); }
+    else if (state.view === 'changes') await loadGainers('#changesTable', 100);
+    else if (state.view === 'compare') await loadDiff();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+/** Encode the current view in the URL so it can be shared or reloaded.
+ *
+ * Pasting a link to exactly what you are looking at is most of what makes a
+ * diagnostic tool usable in a ticket or a chat thread.
+ */
+function syncHash() {
+  const p = new URLSearchParams();
+  p.set('view', state.view);
+  if (state.path && state.path !== state.rootPath) p.set('path', state.path);
+  if (state.window !== '-24h') p.set('window', state.window);
+  if (state.metric !== 'apparent') p.set('metric', state.metric);
+  if (state.view === 'compare') {
+    // A comparison is the thing most worth sharing: "look at what happened
+    // between these two moments" is the whole point of the view.
+    const f = $('#diffFrom').value, t = $('#diffTo').value;
+    if (f) p.set('from', f);
+    if (t) p.set('to', t);
+  }
+  const h = '#' + p.toString();
+  if (location.hash !== h) history.replaceState(null, '', h);
+}
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const v = p.get('view');
+  if (v && ['overview', 'explorer', 'changes', 'compare'].includes(v)) state.view = v;
+  if (p.get('path')) state.path = p.get('path');
+  if (p.get('window')) state.window = p.get('window');
+  if (p.get('metric')) state.metric = p.get('metric');
+  state.diffFrom = p.get('from');
+  state.diffTo = p.get('to');
+}
+
+function switchView(v) {
+  state.view = v;
+  $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
+  $$('.view').forEach((s) => s.classList.toggle('on', s.id === 'view-' + v));
+  syncHash();
+  // ECharts cannot size a hidden container, so resize once it is visible.
+  requestAnimationFrame(() => Object.values(charts).forEach((c) => c.resize()));
+  refresh();
+}
+
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem('dutime-theme', t);
+  // Re-read the custom properties and rebuild, rather than tinting: the dark
+  // steps are their own validated set, not an automatic flip of the light ones.
+  refresh();
+}
+
+async function init() {
+  const saved = localStorage.getItem('dutime-theme');
+  if (saved) document.documentElement.dataset.theme = saved;
+  readHash();
+
+  $('#theme').addEventListener('click', () => {
+    const cur = document.documentElement.dataset.theme;
+    const isDark = cur === 'dark'
+      || (cur !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    applyTheme(isDark ? 'light' : 'dark');
+  });
+
+  $$('.tabs button').forEach((b) =>
+    b.addEventListener('click', () => switchView(b.dataset.view)));
+
+  $$('.seg [data-metric]').forEach((b) => b.addEventListener('click', () => {
+    state.metric = b.dataset.metric;
+    $$('.seg [data-metric]').forEach((x) => x.classList.toggle('on', x === b));
+    refresh();
+  }));
+
+  $$('.seg [data-mode]').forEach((b) => b.addEventListener('click', () => {
+    state.mode = b.dataset.mode;
+    $$('.seg [data-mode]').forEach((x) => x.classList.toggle('on', x === b));
+    $('#collapseWrap').style.visibility = state.mode === 'inclusive' ? 'visible' : 'hidden';
+    refresh();
+  }));
+  $('#collapseWrap').style.visibility = 'hidden';
+
+  $$('.seg [data-dir]').forEach((b) => b.addEventListener('click', () => {
+    state.dir = b.dataset.dir;
+    $$('.seg [data-dir]').forEach((x) => x.classList.toggle('on', x === b));
+    refresh();
+  }));
+
+  $('#collapse').addEventListener('change', (e) => {
+    state.collapse = e.target.checked;
+    refresh();
+  });
+
+  $('#window').addEventListener('change', (e) => { state.window = e.target.value; refresh(); });
+  $('#root').addEventListener('change', async (e) => {
+    state.root = Number(e.target.value);
+    state.path = null;
+    await loadScans();
+    refresh();
+  });
+
+  $('#timeSlider').addEventListener('input', (e) => {
+    state.scanIdx = Number(e.target.value);
+    updateTimeLabel();
+  });
+  $('#timeSlider').addEventListener('change', () => loadTreemap());
+
+  $('#diffFrom').addEventListener('change', () => { loadDiff(); syncHash(); });
+  $('#diffTo').addEventListener('change', () => { loadDiff(); syncHash(); });
+
+  $('#csv').addEventListener('click', () => {
+    const rows = [['delta_bytes', 'path']].concat(
+      state.lastChanges.map((r) => [r.delta, r.path.name]));
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = 'dutime-changes.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  addEventListener('resize', () => Object.values(charts).forEach((c) => c.resize()));
+
+  try {
+    const r = await api('roots');
+    if (!r.roots.length) {
+      document.querySelector('main').innerHTML =
+        '<div class="card"><div class="empty">No roots tracked yet.<br><br>'
+        + 'Run <code>dutime scan /some/path</code> and reload.</div></div>';
+      return;
+    }
+    $('#root').innerHTML = r.roots.map((x) =>
+      `<option value="${x.root_id}">${escapeHtml(x.path.name)}</option>`).join('');
+    state.root = r.roots[0].root_id;
+    state.rootPath = r.roots[0].path.name;
+    await loadScans();
+    state.scanIdx = Math.max(0, state.scans.length - 1);
+    $('#timeSlider').value = state.scanIdx;
+    updateTimeLabel();
+
+    // Reflect anything the hash selected back into the controls.
+    // A window from the hash that is not one of the presets would blank the
+    // control; add it rather than showing an empty box.
+    const wsel = $('#window');
+    if (![...wsel.options].some((o) => o.value === state.window)) {
+      wsel.add(new Option(`Last ${state.window.replace('-', '')}`, state.window));
+    }
+    wsel.value = state.window;
+    $$('.seg [data-metric]').forEach((b) =>
+      b.classList.toggle('on', b.dataset.metric === state.metric));
+    switchView(state.view);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+init();

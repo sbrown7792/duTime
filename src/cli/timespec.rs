@@ -32,6 +32,13 @@ pub fn parse(s: &str, now: i64) -> Result<Target> {
     if let Ok(epoch) = s.parse::<i64>() {
         return Ok(Target::At(epoch));
     }
+    // A bare duration means "ago". Unambiguous, because a duration always
+    // carries a unit suffix and a bare integer was already taken as an epoch
+    // above -- and it is what people type when the shell has eaten their
+    // leading minus.
+    if let Ok(d) = parse_duration(s) {
+        return Ok(Target::At(now - d));
+    }
     Ok(Target::At(parse_rfc3339(s)?))
 }
 
@@ -183,6 +190,9 @@ mod tests {
         assert_eq!(parse("-24h", now).unwrap(), Target::At(now - 86_400));
         assert_eq!(parse("scan:42", now).unwrap(), Target::Scan(42));
         assert_eq!(parse("1788998400", now).unwrap(), Target::At(1_788_998_400));
+        // A bare duration reads as "ago", so a shell-mangled "-7d" still works.
+        assert_eq!(parse("7d", now).unwrap(), Target::At(now - 604_800));
+        assert_eq!(parse("90m", now).unwrap(), Target::At(now - 5_400));
     }
 
     #[test]

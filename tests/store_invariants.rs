@@ -18,7 +18,6 @@ use dutime::store::query::Extreme;
 use dutime::store::{Store, query};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 
 struct Harness {
     store: Store,

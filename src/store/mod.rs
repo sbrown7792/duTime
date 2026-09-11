@@ -10,6 +10,7 @@
 
 pub mod commit;
 pub mod query;
+pub mod snapshot;
 
 use crate::model::{Kind, PathId, RootId, ScanId};
 use anyhow::{Context, Result};

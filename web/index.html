@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>duTime</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">du<span>Time</span></div>
+
+  <div class="controls">
+    <label class="ctl">
+      <span>Root</span>
+      <select id="root"></select>
+    </label>
+    <label class="ctl">
+      <span>Window</span>
+      <select id="window">
+        <option value="-1h">Last hour</option>
+        <option value="-24h" selected>Last 24 hours</option>
+        <option value="-7d">Last 7 days</option>
+        <option value="-30d">Last 30 days</option>
+        <option value="-90d">Last 90 days</option>
+      </select>
+    </label>
+    <div class="ctl seg" role="group" aria-label="Size metric">
+      <span>Size</span>
+      <div>
+        <button data-metric="apparent" class="on" title="Sum of st_size — what the files claim to contain">Apparent</button>
+        <button data-metric="allocated" title="Sum of st_blocks×512 — what the filesystem actually spent">Allocated</button>
+      </div>
+    </div>
+    <button id="theme" class="icon" title="Switch light / dark" aria-label="Switch light / dark">◐</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-view="overview" class="on">Overview</button>
+  <button role="tab" data-view="explorer">Explorer</button>
+  <button role="tab" data-view="changes">Changes</button>
+  <button role="tab" data-view="compare">Compare</button>
+</nav>
+
+<main>
+  <!-- ───────────────────────── Overview ───────────────────────── -->
+  <section id="view-overview" class="view on">
+    <div class="tiles" id="tiles"></div>
+
+    <figure class="card">
+      <figcaption>
+        <h2>Space used over time</h2>
+        <p class="sub" id="usedSub">How the tracked tree has grown.</p>
+      </figcaption>
+      <div class="plot" id="usedChart"></div>
+    </figure>
+
+    <figure class="card">
+      <figcaption>
+        <h2>Biggest gainers</h2>
+        <p class="sub" id="gainSub">Which directory's own files grew the most.</p>
+      </figcaption>
+      <div id="gainTable"></div>
+    </figure>
+  </section>
+
+  <!-- ───────────────────────── Explorer ───────────────────────── -->
+  <section id="view-explorer" class="view">
+    <div class="card">
+      <div class="rowctl">
+        <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
+        <div class="spacer"></div>
+        <div class="slider">
+          <label for="timeSlider">As of</label>
+          <input type="range" id="timeSlider" min="0" max="0" value="0" step="1">
+          <output id="timeLabel">—</output>
+        </div>
+      </div>
+      <div class="plot tall" id="treemap"></div>
+      <p class="note">
+        Area is size. Shade deepens with nesting depth — hierarchy is read from the
+        nested rectangles, not from colour. Click to descend; drag the slider to see
+        the same tree at an earlier moment.
+      </p>
+    </div>
+
+    <figure class="card">
+      <figcaption>
+        <h2 id="seriesTitle">Composition over time</h2>
+        <p class="sub">The selected directory broken into its largest children.</p>
+      </figcaption>
+      <div class="plot mid" id="seriesChart"></div>
+      <details class="tableview">
+        <summary>Table view</summary>
+        <div id="seriesTable"></div>
+      </details>
+    </figure>
+  </section>
+
+  <!-- ───────────────────────── Changes ───────────────────────── -->
+  <section id="view-changes" class="view">
+    <div class="card">
+      <div class="rowctl">
+        <div class="seg" role="group" aria-label="Attribution mode">
+          <button data-mode="exclusive" class="on" title="The directory whose own files changed">Exclusive</button>
+          <button data-mode="inclusive" title="Roll changes up the ancestor chain">Inclusive</button>
+        </div>
+        <div class="seg" role="group" aria-label="Direction">
+          <button data-dir="gainers" class="on">Grew</button>
+          <button data-dir="losers">Shrank</button>
+        </div>
+        <label class="chk" id="collapseWrap">
+          <input type="checkbox" id="collapse" checked>
+          <span>Hide ancestors explained by one child</span>
+        </label>
+        <div class="spacer"></div>
+        <button id="csv" class="ghost">Export CSV</button>
+      </div>
+      <div id="changesTable"></div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── Compare ───────────────────────── -->
+  <section id="view-compare" class="view">
+    <div class="card">
+      <div class="rowctl">
+        <label class="ctl"><span>From</span><select id="diffFrom"></select></label>
+        <label class="ctl"><span>To</span><select id="diffTo"></select></label>
+        <div class="spacer"></div>
+        <div class="divlegend" aria-hidden="true">
+          <span class="sw d-3">−−</span><span class="sw d-2">−</span><span class="sw d-1">−</span>
+          <span class="sw d0">·</span>
+          <span class="sw u1">+</span><span class="sw u2">+</span><span class="sw u3">++</span>
+          <em>shrank &nbsp;→&nbsp; grew</em>
+        </div>
+      </div>
+      <div class="plot tall" id="diffmap"></div>
+      <p class="note">
+        Area is the larger of the two sizes, so something deleted still shows at the
+        scale it mattered instead of vanishing. Colour is the change: red grew, blue
+        shrank, grey stayed put. Every tile is also labelled with a signed figure, so
+        the reading never depends on colour alone.
+      </p>
+    </div>
+  </section>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="/vendor/echarts.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# duTime — per-user unit.
+#
+# No capabilities, no root, no sudo to install. Tracks whatever the user can
+# already read, which on a workstation is the part that actually grows.
+[Unit]
+Description=duTime — disk usage over time (user)
+After=default.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=900
+ExecStart=%h/.local/bin/dutime serve --config %h/.config/dutime/config.toml
+Restart=on-failure
+RestartSec=10s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+Nice=19
+IOSchedulingClass=idle
+MemoryHigh=512M
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,77 @@
+# duTime — system-wide unit.
+#
+# Runs as a dedicated unprivileged user with exactly one capability:
+# CAP_DAC_READ_SEARCH, which grants read and traverse on the whole filesystem
+# and nothing else — no write, no chown, no module loading. Running as root
+# would be strictly worse for no benefit, since duTime never writes outside its
+# own state directory.
+#
+# Verify with:  systemd-analyze security dutime.service
+[Unit]
+Description=duTime — disk usage over time
+Documentation=https://github.com/sbrown7792/duTime
+After=network.target local-fs.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=900
+User=dutime
+Group=dutime
+ExecStart=/usr/bin/dutime serve --config /etc/dutime/config.toml
+Restart=on-failure
+RestartSec=10s
+
+StateDirectory=dutime
+StateDirectoryMode=0700
+ConfigurationDirectory=dutime
+UMask=0077
+
+# ── privilege ────────────────────────────────────────────────────────────
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# ── filesystem ───────────────────────────────────────────────────────────
+# ProtectHome=read-only is not a mistake: duTime must read /home and must
+# never write to it, which is exactly what this expresses.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/dutime
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# ── kernel and system ────────────────────────────────────────────────────
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+# ── resources ────────────────────────────────────────────────────────────
+# A background diagnostic must never be the reason something else stutters.
+Nice=19
+CPUWeight=20
+CPUQuota=200%
+IOSchedulingClass=idle
+IOWeight=10
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
