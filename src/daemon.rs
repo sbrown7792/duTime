@@ -169,7 +169,15 @@ pub async fn serve(cfg: Config) -> Result<()> {
         format!("binding {} (is another duTime already running?)", cfg.listen)
     })?;
     let bound = listener.local_addr()?;
-    tracing::info!("duTime listening on http://{bound}");
+    // Version first, and with the binary's own mtime: on a machine where the
+    // deploy is "copy the binary over", the commonest reason a fix appears
+    // not to work is that the fix is not there.
+    tracing::info!(
+        "duTime {} — binary built {}",
+        crate::cli::VERSION,
+        crate::cli::build_mtime().unwrap_or_else(|| "unknown".into())
+    );
+    tracing::info!("listening on http://{bound}");
     if cfg.access_log {
         tracing::info!("access log on: one line per HTTP request");
     }

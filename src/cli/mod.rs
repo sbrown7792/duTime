@@ -15,8 +15,28 @@ use bytesize::ByteSize;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
+/// Version, commit and build date.
+///
+/// duTime is deployed by copying a binary to a server, so "is the thing
+/// running there the thing I just built?" has to be answerable. A bare
+/// semver cannot answer it: it is identical across every build between
+/// releases, which is exactly the window in which the question gets asked.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("DUTIME_BUILD"), ")");
+
+/// When this binary was linked, read from the binary itself at runtime.
+///
+/// The compile-time stamp above can go stale if the build script does not
+/// rerun. This cannot: it is the mtime of the file currently executing. When
+/// the question is "did my copy actually land", this is the answer.
+pub fn build_mtime() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let t = std::fs::metadata(&exe).ok()?.modified().ok()?;
+    let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    Some(crate::cli::fmt_time(secs))
+}
+
 #[derive(Parser)]
-#[command(name = "dutime", version, about = "Track disk usage over time")]
+#[command(name = "dutime", version = VERSION, about = "Track disk usage over time")]
 pub struct Cli {
     /// Database file. Defaults to $XDG_DATA_HOME/dutime/dutime.db, or
     /// /var/lib/dutime/dutime.db when running as a system service.
@@ -523,6 +543,13 @@ fn cmd_doctor(db_path: &Path, cfg: &crate::config::Config, network: bool) -> Res
     // Reachability comes first and never depends on the database. Someone
     // running `doctor` because a page will not load should not be met with
     // "no such file" from a check they did not ask about.
+    println!("{:<28} {VERSION}", "version");
+    println!(
+        "{:<28} {} (built {})",
+        "binary",
+        std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
+        build_mtime().unwrap_or_else(|| "unknown".into())
+    );
     println!("{:<28} {}", "database", db_path.display());
     if network {
         problems += doctor_network(cfg)?;
@@ -660,7 +687,7 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-fn fmt_time(epoch: i64) -> String {
+pub fn fmt_time(epoch: i64) -> String {
     // Deliberately dependency-free: a fixed civil-time rendering of a UTC
     // epoch. Storage and comparison are always epoch seconds; this is only for
     // display.

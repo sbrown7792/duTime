@@ -52,6 +52,30 @@ $ dutime install --system        # dedicated user + CAP_DAC_READ_SEARCH
 unit runs as an unprivileged `dutime` user holding exactly one capability,
 never as root, and scores 1.7 on `systemd-analyze security`.
 
+### Deploying to another machine
+
+There is no package yet, so it is build-then-copy:
+
+```console
+$ cargo build --release                            # on a build machine
+$ scp target/release/dutime yourserver:/tmp/
+$ ssh yourserver 'sudo install -m755 /tmp/dutime /usr/bin/dutime'
+$ ssh yourserver 'dutime --version'
+dutime 0.1.0 (0d8da3ba74 2026-09-10)
+```
+
+**Check that last line.** `--version` carries the commit and the build date,
+and `dutime doctor` and the startup log both add the binary's own mtime, so
+"is the thing running there the thing I just built?" is answerable rather
+than assumed. The commonest reason a fix appears not to work is `cargo build`
+having been run without `--release` while `--release` is what gets copied —
+the stale binary starts, serves, and behaves exactly like the old one,
+because it is the old one.
+
+The binary is dynamically linked and needs a glibc at least as new as the
+build machine's (currently 2.39 — Ubuntu 24.04 or later). Copying from a
+newer distro to an older one fails at exec with a version error.
+
 **To serve the network, say so at install time:**
 
 ```console
