@@ -48,6 +48,20 @@ fn apply_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The SQL predicate for a scan whose data can be used.
+///
+/// `partial` means some paths could not be read, so the totals are an
+/// underestimate — but the rows that were written are correct and complete,
+/// and the shortfall is usually the same directory every time, so the *trend*
+/// still holds. Excluding them would be worse than including them: on a host
+/// with one permanently unreadable directory, every scan is partial, and a
+/// query that demands 'ok' returns an empty history and a UI with no data at
+/// all. `aborted`, `error` and `overrun` are genuinely unusable and stay out.
+///
+/// Single-sourced because it appears in eight queries, and the failure mode
+/// of updating seven of them is invisible.
+pub const USABLE_SCAN: &str = "status IN ('ok', 'partial')";
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -159,7 +173,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT MAX(scan_id) FROM scan WHERE root_id = ?1 AND status = 'ok'",
+                &format!("SELECT MAX(scan_id) FROM scan WHERE root_id = ?1 AND {USABLE_SCAN}"),
                 params![root_id],
                 |r| r.get::<_, Option<ScanId>>(0),
             )
@@ -173,8 +187,10 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT scan_id, started_at FROM scan
-                 WHERE root_id = ?1 AND status = 'ok' ORDER BY scan_id ASC LIMIT 1",
+                &format!(
+                    "SELECT scan_id, started_at FROM scan
+                     WHERE root_id = ?1 AND {USABLE_SCAN} ORDER BY scan_id ASC LIMIT 1"
+                ),
                 params![root_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -183,7 +199,7 @@ impl Store {
 
     pub fn scan_count(&self, root_id: RootId) -> Result<i64> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM scan WHERE root_id = ?1 AND status = 'ok'",
+            &format!("SELECT COUNT(*) FROM scan WHERE root_id = ?1 AND {USABLE_SCAN}"),
             params![root_id],
             |r| r.get(0),
         )?)

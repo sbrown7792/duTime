@@ -177,6 +177,30 @@ figcaption { margin-bottom: 14px; }
 .tile .m.good { color: var(--success-text); }
 .tile .m.warn { color: var(--critical); }
 
+/* An incomplete scan reports a total that is too low, so this has to be
+   impossible to miss and impossible to misread. The status is carried by the
+   accent bar and the bold lead, not by the text colour: #fab219 as body text
+   on a light surface fails contrast, and colour alone would not survive a
+   greyscale print or a CVD reader anyway. */
+.notice {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface-1));
+  border-radius: 8px;
+  padding: 11px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.notice strong { color: var(--text-primary); }
+.notice .detail {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
 /* ── tables ──────────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); }

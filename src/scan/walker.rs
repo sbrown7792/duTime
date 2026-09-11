@@ -90,8 +90,32 @@ pub struct ScanStats {
     pub n_entities: i64,
     pub n_hardlinks_deduped: i64,
     pub n_errors: i64,
+    /// A few of the paths behind `n_errors`, for a message someone can act on.
+    ///
+    /// A count alone is not actionable: "3 errors" could be anything, while
+    /// "cannot read /mnt/nextcloud/data" names the permission to fix. Capped,
+    /// because a scan that cannot read anything must not turn into a log
+    /// entry the size of the filesystem.
+    pub unreadable: Vec<PathBuf>,
     pub skipped_mounts: Vec<PathBuf>,
 }
+
+/// The path an ignore walk error refers to, if it names one.
+///
+/// `ignore::Error` nests: a `WithDepth` wraps a `WithPath` wraps the I/O
+/// error, and only the middle layer carries the path we need.
+fn err_path(e: &ignore::Error) -> Option<&Path> {
+    match e {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            err_path(err)
+        }
+        _ => None,
+    }
+}
+
+/// How many example paths to keep out of an arbitrarily large failure set.
+const MAX_UNREADABLE_EXAMPLES: usize = 8;
 
 #[derive(Debug)]
 pub struct ScanResult {
@@ -129,9 +153,10 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
         .collect();
 
     let matcher = build_matcher(&root, &opts.exclude)?;
-    let (raw, n_errors) = walk(&root, root_dev, opts, &skip, &matcher, &prefixes)?;
+    let (raw, n_errors, unreadable) = walk(&root, root_dev, opts, &skip, &matcher, &prefixes)?;
     let mut out = assemble(&root, raw, opts, skip);
     out.stats.n_errors = n_errors;
+    out.stats.unreadable = unreadable;
     Ok(out)
 }
 
@@ -156,7 +181,7 @@ fn walk(
     skip: &std::collections::HashSet<PathBuf>,
     matcher: &Gitignore,
     prefixes: &[PathBuf],
-) -> anyhow::Result<(Vec<RawEntry>, i64)> {
+) -> anyhow::Result<(Vec<RawEntry>, i64, Vec<PathBuf>)> {
     let (tx, rx) = mpsc::channel::<RawEntry>();
     let collector = std::thread::spawn(move || rx.into_iter().collect::<Vec<_>>());
 
@@ -173,6 +198,7 @@ fn walk(
         .skip_stdout(true);
 
     let n_errors = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let unreadable = std::sync::Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
     {
         let root = root.to_path_buf();
         wb.build_parallel().run(|| {
@@ -182,12 +208,23 @@ fn walk(
             let matcher = matcher.clone();
             let prefixes = prefixes.to_vec();
             let n_errors = n_errors.clone();
+            let unreadable = unreadable.clone();
             Box::new(move |res| {
                 use ignore::WalkState;
                 let entry = match res {
                     Ok(e) => e,
-                    Err(_) => {
+                    Err(e) => {
                         n_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Keep the first few paths. Everything under an
+                        // unreadable directory is silently absent from the
+                        // totals, so the one thing a scan must not do is
+                        // report a smaller number without saying why.
+                        if let Some(p) = err_path(&e) {
+                            let mut v = unreadable.lock().unwrap();
+                            if v.len() < MAX_UNREADABLE_EXAMPLES {
+                                v.push(p.to_path_buf());
+                            }
+                        }
                         return WalkState::Continue;
                     }
                 };
@@ -252,7 +289,10 @@ fn walk(
     }
     drop(tx);
     let raw = collector.join().map_err(|_| anyhow::anyhow!("collector thread panicked"))?;
-    Ok((raw, n_errors.load(std::sync::atomic::Ordering::Relaxed)))
+    let unreadable = std::sync::Arc::try_unwrap(unreadable)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_default();
+    Ok((raw, n_errors.load(std::sync::atomic::Ordering::Relaxed), unreadable))
 }
 
 /// Turn raw walk output into a tree of exclusive sizes.

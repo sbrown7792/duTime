@@ -116,6 +116,9 @@ impl Scheduler {
         .await??;
         let (r, roll, opts) = result;
         let walk_ms = t0.elapsed().as_millis() as i64;
+        // Read before `r` moves into the commit closure.
+        let n_errors = r.stats.n_errors;
+        let examples = r.stats.unreadable.clone();
 
         let state = self.state.clone();
         let canon = opts.root.canonicalize().unwrap_or(opts.root.clone());
@@ -141,6 +144,21 @@ impl Scheduler {
             walk_ms,
             "scan complete"
         );
+        // Everything under an unreadable directory is simply absent from the
+        // total, so a quiet scan here would report a shrink that never
+        // happened. Warn, and name paths: the fix is a permission, and you
+        // cannot grant a permission to a count.
+        if n_errors > 0 {
+            tracing::warn!(
+                root = %root.path.display(),
+                scan = stats.scan_id,
+                unreadable = n_errors,
+                "scan is PARTIAL — {n_errors} path(s) could not be read, so this total is \
+                 lower than the truth. Examples: {}{}",
+                examples.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
+                if n_errors > examples.len() as i64 { ", ..." } else { "" }
+            );
+        }
         Ok(())
     }
 }

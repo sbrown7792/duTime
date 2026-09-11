@@ -218,6 +218,20 @@ async function loadOverview() {
     ? 'Only one sample so far — a trend appears once duTime has scanned a few times.'
     : `${o.scans} samples since ${fmtTime(o.first_scan.at)}.`;
 
+  // A scan that could not read part of the tree reports a total that is too
+  // low, and a shortfall that is never mentioned is indistinguishable from a
+  // real shrink — the one confusion this tool exists to prevent.
+  $('#scanWarn').innerHTML = o.scan_status === 'partial'
+    ? `<div class="notice" role="status">
+         <strong>This scan is incomplete.</strong> Some paths could not be read, so
+         every total below is lower than the truth. Growth trends are still
+         meaningful when the same paths fail each time.
+         ${o.scan_error ? `<div class="detail">${escapeHtml(o.scan_error)}</div>` : ''}
+         <div class="detail">Run duTime with CAP_DAC_READ_SEARCH (the system unit
+         does) to read directories it does not own.</div>
+       </div>`
+    : '';
+
   await loadGainers('#gainTable', 8);
 }
 

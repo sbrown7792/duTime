@@ -501,3 +501,81 @@ fn collapse_keeps_directories_with_several_contributors() {
         "a directory with three equal contributors must survive collapsing, got {paths:?}"
     );
 }
+
+/// A scan that could not read part of the tree must say so — and must still
+/// be usable.
+///
+/// Both halves matter, and the second is the one that nearly broke. Marking
+/// an incomplete scan `partial` is worthless if every query then filters on
+/// `status = 'ok'`: a host with one permanently unreadable directory produces
+/// nothing but partial scans, and a UI that hides them shows an empty
+/// history and no data at all. The totals are an underestimate, but they are
+/// internally consistent, and the shortfall is the same directory each time,
+/// so the trend still holds. Underreported-but-labelled beats absent.
+#[test]
+#[cfg(unix)]
+fn an_unreadable_directory_makes_the_scan_partial_but_usable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut h = Harness::new();
+    h.write("open/visible.bin", 4 << 20);
+    h.write("closed/hidden.bin", 9 << 20);
+
+    let closed = h.dir.path().join("closed");
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    // Restore before the TempDir drops, or cleanup fails and the next run
+    // inherits the wreckage.
+    let restore = scopeguard(closed.clone());
+
+    let (stats, _, _) = h.snapshot();
+    let scan_id = stats.scan_id;
+
+    let (status, err): (String, Option<String>) = h
+        .store
+        .conn
+        .query_row("SELECT status, err FROM scan WHERE scan_id = ?1", [scan_id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(status, "partial", "an unreadable directory was recorded as a clean scan");
+    let err = err.expect("partial scan recorded no reason");
+    assert!(err.contains("could not be read"), "{err}");
+    // A count is not actionable; the path names the permission to fix.
+    assert!(err.contains("closed"), "the failing path was not reported: {err}");
+
+    // The half it could read is still counted, and is not silently zero.
+    let total: i64 = h
+        .store
+        .conn
+        .query_row("SELECT incl_bytes FROM scan WHERE scan_id = ?1", [scan_id], |r| r.get(0))
+        .unwrap();
+    assert!(total >= 4 << 20, "the readable half went missing too: {total}");
+    assert!(total < 13 << 20, "the unreadable half was somehow counted: {total}");
+
+    // The part that nearly broke: a partial scan must still be found.
+    assert_eq!(
+        h.store.last_scan(h.root_id).unwrap(),
+        Some(scan_id),
+        "a partial scan is invisible to last_scan, so the UI would show nothing"
+    );
+    assert_eq!(h.store.scan_count(h.root_id).unwrap(), 1);
+    assert!(h.store.first_scan(h.root_id).unwrap().is_some());
+    assert!(
+        query::resolve_scan(&h.store, h.root_id, h.clock + 10_000).unwrap().is_some(),
+        "a partial scan cannot be resolved by time, so history queries return nothing"
+    );
+
+    drop(restore);
+}
+
+/// Put a mode-000 directory back so the temp dir can be removed.
+fn scopeguard(p: std::path::PathBuf) -> impl Drop {
+    struct G(std::path::PathBuf);
+    impl Drop for G {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    G(p)
+}

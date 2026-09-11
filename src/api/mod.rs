@@ -15,6 +15,7 @@
 pub mod state;
 
 use crate::model::{Metric, PathId, RootId, ScanId};
+use crate::store::USABLE_SCAN;
 use crate::store::query::{self, Extreme};
 use crate::store::snapshot::Snapshot;
 use axum::extract::{Query, State};
@@ -199,12 +200,12 @@ async fn scans(State(s): State<Arc<AppState>>, Query(q): Query<ScansQ>) -> ApiRe
     blocking(move || {
         let root = s.pick_root(q.root)?;
         let store = s.read();
-        let mut st = store.conn.prepare(
+        let mut st = store.conn.prepare(&format!(
             "SELECT scan_id, started_at, duration_ms, n_events, incl_bytes, incl_blocks,
-                    n_dirs, n_files, fs_total, fs_free, fs_avail
-             FROM scan WHERE root_id = ?1 AND status = 'ok'
-             ORDER BY scan_id DESC LIMIT ?2",
-        )?;
+                    n_dirs, n_files, fs_total, fs_free, fs_avail, status, err
+             FROM scan WHERE root_id = ?1 AND {USABLE_SCAN}
+             ORDER BY scan_id DESC LIMIT ?2"
+        ))?;
         let rows = st.query_map([root, q.limit.unwrap_or(500)], |r| {
             Ok(json!({
                 "scan_id": r.get::<_, i64>(0)?,
@@ -243,7 +244,7 @@ async fn overview(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> Ap
         let metric = metric_of(&q.metric);
         let (scan_id, at) = s.pick_scan(root, &q.at)?;
 
-        let (path, first, total_scans, fs, history) = {
+        let (path, first, total_scans, fs, partial, history) = {
             let store = s.read();
             let path = store.root_path(root)?;
             let first = store.first_scan(root)?;
@@ -253,10 +254,18 @@ async fn overview(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> Ap
                 [scan_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            let mut st = store.conn.prepare(
-                "SELECT started_at, incl_bytes, incl_blocks, fs_free FROM scan
-                 WHERE root_id = ?1 AND status = 'ok' ORDER BY scan_id",
+            // A scan that could not read everything reports a total that is
+            // too low. That has to reach the screen: the whole point of this
+            // page is that the number on it means something.
+            let partial: (String, Option<String>) = store.conn.query_row(
+                "SELECT status, err FROM scan WHERE scan_id = ?1",
+                [scan_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            let mut st = store.conn.prepare(&format!(
+                "SELECT started_at, incl_bytes, incl_blocks, fs_free FROM scan
+                 WHERE root_id = ?1 AND {USABLE_SCAN} ORDER BY scan_id"
+            ))?;
             let rows = st.query_map([root], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -266,7 +275,7 @@ async fn overview(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> Ap
                 ))
             })?;
             let history: Vec<(i64, i64, i64, Option<i64>)> = rows.collect::<rusqlite::Result<_>>()?;
-            (path, first, total, fs, history)
+            (path, first, total, fs, partial, history)
         };
 
         let series: Vec<Value> = history
@@ -338,6 +347,8 @@ async fn overview(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> Ap
             "fs": { "total": fs.0, "free": fs.1, "avail": fs.2 },
             "history": series,
             "forecast": forecast,
+            "scan_status": partial.0,
+            "scan_error": partial.1,
         }))
     })
     .await
@@ -755,11 +766,11 @@ async fn series(State(s): State<Arc<AppState>>, Query(q): Query<SeriesQ>) -> Api
         level.push(other_and_own.max(0)); // "everything else"
 
         // Every scan in the window becomes an x position.
-        let mut st = store.conn.prepare(
+        let mut st = store.conn.prepare(&format!(
             "SELECT scan_id, started_at FROM scan
-             WHERE root_id = ?1 AND scan_id >= ?2 AND scan_id <= ?3 AND status = 'ok'
-             ORDER BY scan_id",
-        )?;
+             WHERE root_id = ?1 AND scan_id >= ?2 AND scan_id <= ?3 AND {USABLE_SCAN}
+             ORDER BY scan_id"
+        ))?;
         let scan_rows = st.query_map(params_3(root, s1, s2), |r| {
             Ok((r.get::<_, ScanId>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -1182,11 +1193,11 @@ fn sparklines(
     }
     let node_id = snap.ids[node as usize];
 
-    let mut st = store.conn.prepare(
+    let mut st = store.conn.prepare(&format!(
         "SELECT scan_id FROM scan
-         WHERE root_id = ?1 AND scan_id >= ?2 AND scan_id <= ?3 AND status = 'ok'
-         ORDER BY scan_id",
-    )?;
+         WHERE root_id = ?1 AND scan_id >= ?2 AND scan_id <= ?3 AND {USABLE_SCAN}
+         ORDER BY scan_id"
+    ))?;
     let scan_ids: Vec<ScanId> = st
         .query_map([root, s1, s2], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;

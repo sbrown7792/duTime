@@ -241,6 +241,36 @@ config that parses can still track a directory you did not mean. It warns
 about a root nested inside another (legal, but its bytes are then counted
 under both) and exits non-zero if a root does not exist.
 
+### Reading directories duTime does not own
+
+**Do not run it as root.** The system unit already grants
+`CAP_DAC_READ_SEARCH`, which bypasses read and traverse checks on the whole
+filesystem and grants nothing else — no write, no chown, no module loading.
+A `chmod 700` directory owned by another user is readable with it, and root
+would add only the ability to damage something.
+
+```console
+$ systemctl show dutime -p AmbientCapabilities
+AmbientCapabilities=cap_dac_read_search
+```
+
+If that is empty you are running the `--user` unit, which deliberately has no
+capabilities and can only see what you can. Reinstall with
+`sudo dutime install --system`.
+
+Two other things stop a directory being scanned, and neither is a permission:
+
+- **A separate mount.** `one_filesystem = true` means a scan of `/` stops at
+  the mount boundary, so a data drive needs its own `[[root]]`.
+- **An exclude.** `dutime config --check` lists what applies to each root.
+
+**An unreadable path is never silent.** Everything beneath it is simply absent
+from the total, which is indistinguishable from a real shrink unless somebody
+says so — so the scan is recorded as `partial`, the daemon logs a warning
+naming the paths, and the Overview carries a banner. Partial scans still
+appear in history: the totals are an underestimate, but the same paths
+usually fail every time, so the trend remains meaningful.
+
 ## Troubleshooting
 
 ### The service is running but the page just spins

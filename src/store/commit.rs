@@ -66,16 +66,43 @@ pub fn commit_scan(
     let tx = store.conn.transaction()?;
     let mut out = CommitStats::default();
 
+    // A scan that could not read part of the tree reports a total that is
+    // too small. Recording that as 'ok' makes the shortfall indistinguishable
+    // from a real shrink, which is the one confusion this tool exists to
+    // prevent — so it is 'partial', and the reason travels with the row.
+    let (status, err) = if stats.n_errors > 0 {
+        let mut e = format!("{} path(s) could not be read", stats.n_errors);
+        if !stats.unreadable.is_empty() {
+            e.push_str(": ");
+            e.push_str(
+                &stats
+                    .unreadable
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if stats.n_errors > stats.unreadable.len() as i64 {
+                e.push_str(", ...");
+            }
+        }
+        ("partial", Some(e))
+    } else {
+        ("ok", None)
+    };
+
     tx.execute(
-        "INSERT INTO scan (root_id, started_at, ended_at, duration_ms, status,
+        "INSERT INTO scan (root_id, started_at, ended_at, duration_ms, status, err,
                            n_dirs, n_files, n_entities, incl_bytes, incl_blocks,
                            fs_total, fs_free, fs_avail)
-         VALUES (?1, ?2, ?3, ?4, 'ok', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             root_id,
             started_at,
             started_at + duration_ms / 1000,
             duration_ms,
+            status,
+            err,
             stats.n_dirs,
             stats.n_files,
             tree.len() as i64,

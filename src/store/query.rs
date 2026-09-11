@@ -13,6 +13,7 @@
 
 use super::Store;
 use crate::model::{PathId, RootId, ScanId};
+use crate::store::USABLE_SCAN;
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
@@ -34,9 +35,11 @@ pub fn resolve_scan(store: &Store, root_id: RootId, at: i64) -> Result<Option<(S
     Ok(store
         .conn
         .query_row(
-            "SELECT scan_id, started_at FROM scan
-             WHERE root_id = ?1 AND started_at <= ?2 AND status = 'ok'
-             ORDER BY started_at DESC LIMIT 1",
+            &format!(
+                "SELECT scan_id, started_at FROM scan
+                 WHERE root_id = ?1 AND started_at <= ?2 AND {USABLE_SCAN}
+                 ORDER BY started_at DESC LIMIT 1"
+            ),
             params![root_id, at],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
