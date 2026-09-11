@@ -247,6 +247,19 @@ tr:last-child td { border-bottom: none; }
 .listing tr.clickable:hover td { background: color-mix(in srgb, var(--s1) 8%, transparent); }
 .listing tr.own td { color: var(--text-muted); font-style: italic; }
 
+/* The up row is chrome, not data: quieter than a real entry, and separated
+   from them so it does not read as the first child of this directory. */
+.listing tr.updir td { border-bottom: 1px solid var(--border); }
+.listing tr.updir td.name { color: var(--text-secondary); }
+.listing tr.updir .upname {
+  color: var(--text-muted); margin-left: 8px; font-size: 12px;
+}
+.listing tr.clickable:focus-visible { outline: none; }
+.listing tr.clickable:focus-visible td {
+  background: color-mix(in srgb, var(--s1) 12%, transparent);
+  box-shadow: inset 0 0 0 1px var(--s1);
+}
+
 .listing .ico { display: inline-block; width: 15px; color: var(--text-muted); }
 .listing .spark { display: block; }
 .listing td.trend, .listing th.trend { width: 144px; }

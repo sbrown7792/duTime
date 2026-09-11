@@ -20,6 +20,7 @@ use dutime::store::commit::{CommitOptions, commit_scan};
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -393,4 +394,45 @@ async fn listing_sparkline_reflects_a_mid_window_deletion() {
     );
     assert_eq!(*spark.last().unwrap(), keep["size"].as_i64().unwrap());
     assert!(keep["delta"].as_i64().unwrap() <= -(40 << 20));
+}
+
+/// The Explorer's "go up" row navigates by a path the server resolved, not by
+/// one the browser rebuilt from what it is displaying. That matters because a
+/// filename that is not valid UTF-8 is *displayed* lossily: trimming the last
+/// component off the string on screen produces a path that no longer resolves
+/// to the directory it came from.
+#[tokio::test]
+async fn listing_reports_a_parent_to_navigate_back_to() {
+    let mut f = Fixture::new();
+    f.write("outer/inner/deep.bin", 6 << 20);
+    f.write("outer/sibling.bin", 2 << 20);
+    f.snapshot();
+    let (state, root) = f.finish();
+
+    // At the scan root there is nowhere further up to go.
+    let top = get(&state, &format!("/api/v1/listing?path={}&from=-7d", enc(&root))).await;
+    assert!(top["parent"].is_null(), "the root claimed a parent: {}", top["parent"]);
+
+    // One level down, the parent is the root, addressed by its full path.
+    let outer = format!("{}/outer", root.display());
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d", enc(Path::new(&outer)))).await;
+    assert_eq!(l["parent"]["path"]["name"].as_str().unwrap(), root.to_str().unwrap());
+
+    // Two levels down, it is the intermediate directory — and the path it
+    // hands back has to be one the API accepts, or the row is a dead end.
+    let inner = format!("{}/outer/inner", root.display());
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d", enc(Path::new(&inner)))).await;
+    assert_eq!(l["parent"]["name"].as_str().unwrap(), "outer");
+    assert_eq!(l["parent"]["path"]["name"].as_str().unwrap(), outer);
+
+    let back = l["parent"]["path"]["name"].as_str().unwrap().to_string();
+    let up = get(&state, &format!("/api/v1/listing?path={}&from=-7d", enc(Path::new(&back)))).await;
+    assert_eq!(up["path"]["name"].as_str().unwrap(), outer);
+    let names: Vec<&str> =
+        up["rows"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"inner"), "walking up lost the child we came from: {names:?}");
+
+    // The parent's own figures are reported, even though the row renders them
+    // only in its tooltip.
+    assert!(l["parent"]["size"].as_i64().unwrap() >= 8 << 20);
 }

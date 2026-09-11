@@ -557,7 +557,7 @@ async function loadListing() {
     const count = dirish
       ? `${r.dirs.toLocaleString()} dirs, ${r.files.toLocaleString()} files`
       : '';
-    return `<tr class="${dirish ? 'clickable' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}">
+    return `<tr class="${dirish ? 'clickable' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}"${dirish ? ' tabindex="0"' : ''}>
       <td class="name" title="${escapeHtml(r.name)}">
         <span class="ico">${KIND_ICON[r.kind] || ''}</span>${escapeHtml(r.name)}${r.lossy ? ' <span title="filename is not valid UTF-8">⚠</span>' : ''}
       </td>
@@ -567,6 +567,23 @@ async function loadListing() {
       <td class="num ct">${count}</td>
     </tr>`;
   }).join('');
+
+  // Pinned above the sorted rows, never sorted into them: it is navigation,
+  // not data. The breadcrumbs can do this too, but the eye is already in the
+  // table when you decide you went the wrong way.
+  // Deliberately no size or change: a figure in a size column that is sorted
+  // descending, sitting above a smaller child, reads as a broken sort. The
+  // parent's numbers go in the tooltip, where they inform without competing.
+  const up = d.parent
+    ? `<tr class="updir clickable" data-path="${escapeHtml(d.parent.path.name)}" tabindex="0"
+           title="Up to ${escapeHtml(d.parent.path.name)} \u2014 ${fmtSize(d.parent.size)}${d.parent.delta ? `, ${fmtDelta(d.parent.delta)}` : ''}">
+         <td class="name">
+           <span class="ico">\u{21B0}</span>..<span class="upname">${escapeHtml(d.parent.name)}</span>
+         </td>
+         <td class="num sz"></td><td class="num dl"></td>
+         <td class="trend"></td><td class="num ct"></td>
+       </tr>`
+    : '';
 
   const own = d.own && d.own.size > 0
     ? `<tr class="own">
@@ -581,7 +598,7 @@ async function loadListing() {
     ? `<div class="more">${d.truncated.toLocaleString()} smaller entries not shown</div>`
     : '';
 
-  $('#listing').innerHTML = rows.length || own
+  $('#listing').innerHTML = rows.length || own || up
     ? `<div class="listing"><table>
         <thead><tr>
           <th class="name sortable"${sortAttr('name')} data-sort="name">Name</th>
@@ -590,7 +607,7 @@ async function loadListing() {
           <th class="trend">Trend</th>
           <th class="num ct">Contents</th>
         </tr></thead>
-        <tbody>${body}${own}</tbody>
+        <tbody>${up}${body}${own}</tbody>
       </table>${more}</div>`
     : '<div class="empty">This directory is empty, or everything in it is below the tracking threshold.</div>';
 
@@ -598,12 +615,19 @@ async function loadListing() {
     `${rows.length.toLocaleString()} entries · trend covers ${fmtTime(d.from.at)} to ${fmtTime(d.to.at)}`
     + (d.window_clamped_to_first_scan ? ' (all the history there is)' : '');
 
-  $$('#listing tr.clickable').forEach((tr) => tr.addEventListener('click', () => {
-    state.path = joinPath(state.path || state.rootPath, [tr.dataset.name]);
-    loadTreemap();
-    loadListing();
-    loadSeries();
-  }));
+  $$('#listing tr.clickable').forEach((tr) => {
+    const go = () => {
+      state.path = tr.dataset.path
+        ?? joinPath(state.path || state.rootPath, [tr.dataset.name]);
+      loadTreemap();
+      loadListing();
+      loadSeries();
+    };
+    tr.addEventListener('click', go);
+    tr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+    });
+  });
 
   $$('#listing th.sortable').forEach((th) => th.addEventListener('click', () => {
     const k = th.dataset.sort;

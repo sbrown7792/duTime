@@ -1059,6 +1059,26 @@ async fn listing(State(s): State<Arc<AppState>>, Query(q): Query<ListingQ>) -> A
 
         let spark = sparklines(&s, root, &snap, node, &kids, s1, s2, metric, &mut level, points)?;
 
+        // The row that walks back up. Resolved here rather than by trimming
+        // the displayed path in the browser: a path component that is not
+        // valid UTF-8 is displayed lossily, so a string built from what is on
+        // screen would not resolve back to the directory it came from.
+        let parent = match snap.parent[node as usize] {
+            crate::model::tree::NO_PARENT => Value::Null,
+            p => {
+                let pi = p as usize;
+                let now = size_of(&snap, p);
+                let then = base.idx(snap.ids[pi]).map(|k| size_of(&base, k)).unwrap_or(0);
+                let mut v = name_json(&snap.name[pi]);
+                let o = v.as_object_mut().unwrap();
+                o.insert("id".into(), json!(snap.ids[pi]));
+                o.insert("path".into(), path_json(&snap.path_of(p)));
+                o.insert("size".into(), json!(now));
+                o.insert("delta".into(), json!(now - then));
+                v
+            }
+        };
+
         let own_now = match metric {
             Metric::Allocated => snap.own_blocks[node as usize],
             Metric::Apparent => snap.own_bytes[node as usize],
@@ -1102,6 +1122,7 @@ async fn listing(State(s): State<Arc<AppState>>, Query(q): Query<ListingQ>) -> A
             "from": { "scan_id": s1, "at": at1 },
             "to": { "scan_id": s2, "at": at2 },
             "window_clamped_to_first_scan": clamped,
+            "parent": parent,
             "truncated": snap.children[node as usize].len().saturating_sub(kids.len()),
             "own": {
                 "size": own_now,
