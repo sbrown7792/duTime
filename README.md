@@ -52,6 +52,18 @@ $ dutime install --system        # dedicated user + CAP_DAC_READ_SEARCH
 unit runs as an unprivileged `dutime` user holding exactly one capability,
 never as root, and scores 1.7 on `systemd-analyze security`.
 
+**To serve the network, say so at install time:**
+
+```console
+$ sudo dutime install --system --listen 0.0.0.0:8471
+```
+
+Not by editing `listen` in the config afterwards. The unit ships with
+`IPAddressAllow=localhost`, so a config change alone gives you a service that
+starts cleanly, reports itself listening, holds a port that `ss` confirms is
+open — and drops every packet from the network. `--listen` writes both halves.
+See [Troubleshooting](#troubleshooting) if you have already hit this.
+
 ## The command line
 
 The CLI is not an afterthought to the web UI — it is what you script against,
@@ -174,6 +186,59 @@ in question before turning the interval down.
 Exclusions use gitignore syntax, but duTime deliberately never reads
 `.gitignore` files off disk — `target/` and `node_modules/` are precisely what
 you are trying to find.
+
+## Troubleshooting
+
+### The service is running but the page just spins
+
+A spinning tab that never errors means packets are being **dropped** rather
+than refused. A refusal is instant and produces a message; a drop produces
+nothing at all, which is why the logs look healthy. Ask duTime:
+
+```console
+$ sudo dutime doctor --config /etc/dutime/config.toml
+```
+
+It prints the bound address, what systemd's IP filter will actually let
+through, the result of connecting to itself, and every URL this host answers
+on. In order of how often each is the culprit:
+
+1. **`IPAddressAllow=localhost` in the unit.** The single most likely cause,
+   and duTime's own fault: the hardened unit is loopback-only, so setting
+   `listen = "0.0.0.0:8471"` in the config and nothing else leaves the filter
+   dropping everything. `doctor` reports this as a `PROBLEM` naming both
+   settings. Fix with `sudo dutime install --system --listen 0.0.0.0:8471`
+   (then `daemon-reload` and `restart`), or narrow it yourself with
+   `sudo systemctl edit dutime` and an `IPAddressAllow=192.168.0.0/16` line.
+2. **Bound to loopback.** `listen = "127.0.0.1:8471"` is the default and is
+   working as designed. Either tunnel it —
+   `ssh -N -L 8471:localhost:8471 yourserver` — or bind the network as above.
+3. **A host firewall.** `sudo ufw allow 8471/tcp`. Note that duTime's
+   self-check cannot see this one: a packet to one of this host's own
+   addresses is routed over loopback and never meets the firewall, so the
+   probe passing does not prove a remote client can connect. `doctor` says so
+   where it reports the result.
+4. **`https://` in the address bar.** duTime speaks plain HTTP. A TLS
+   handshake against a plaintext port hangs exactly like a dropped packet.
+
+To see whether requests arrive at all, turn on the access log — one line per
+request, in and out:
+
+```console
+$ sudo systemctl edit dutime      # [Service] Environment=DUTIME_ACCESS_LOG=1
+$ sudo systemctl restart dutime && journalctl -fu dutime
+```
+
+Requests logged but never answered is a different bug from no requests at all,
+and that distinction is usually the whole diagnosis. (`access_log = true` in
+the config does the same thing.)
+
+### A scan is running and the UI feels slow
+
+It should not block. The walk and the commit both run off the request threads,
+and reads come from a pool of connections separate from the writer. Worst-case
+API latency during a scan is ~160 ms. If you see seconds, open an issue with
+`dutime doctor` output.
 
 ## Status
 

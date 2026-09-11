@@ -21,6 +21,13 @@ pub struct Config {
     pub scan_on_start: bool,
     pub checkpoint_every_scans: i64,
     pub checkpoint_min_bytes: i64,
+    /// Log a line per HTTP request: client, method, path, status, duration.
+    ///
+    /// Off by default because a browser sitting on the dashboard generates a
+    /// steady trickle, and a journal that scrolls is a journal nobody reads.
+    /// Turn it on to answer the question that matters when the page will not
+    /// load: do requests reach us at all?
+    pub access_log: bool,
     #[serde(rename = "root")]
     pub roots: Vec<RootConfig>,
 }
@@ -98,6 +105,7 @@ impl Default for Config {
             scan_on_start: true,
             checkpoint_every_scans: 288,
             checkpoint_min_bytes: 1 << 20,
+            access_log: false,
             roots: Vec::new(),
         }
     }
@@ -119,6 +127,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("DUTIME_DB") {
             cfg.db = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("DUTIME_ACCESS_LOG") {
+            cfg.access_log = !matches!(v.as_str(), "" | "0" | "false" | "no");
         }
 
         if cfg.roots.is_empty() {
@@ -143,8 +154,23 @@ impl Config {
     pub fn sample() -> String {
         r#"# duTime configuration
 
+# Bind address. "127.0.0.1" is reachable only from this machine; use
+# "0.0.0.0" to serve the network.
+#
+# IMPORTANT, on a systemd *system* install: the shipped unit also carries
+# "IPAddressAllow=localhost", which drops non-loopback packets no matter what
+# you bind to here. Changing this line alone gives you a socket that is
+# listening and unreachable at the same time -- a browser tab that spins
+# forever with nothing in the log. Use `dutime install --system --listen
+# 0.0.0.0:8471`, which writes both, or edit IPAddressAllow= in the unit to
+# match. `dutime doctor` checks the two agree.
 listen = "127.0.0.1:8471"
 # db = "/var/lib/dutime/dutime.db"
+
+# Log a line per HTTP request. Off by default; the first thing to turn on when
+# the page will not load, since it separates "requests never arrive" from
+# "requests arrive and something is slow".
+# access_log = false
 
 # Walker threads. Half the cores, capped at 4, by default.
 # threads = 4

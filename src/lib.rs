@@ -7,6 +7,7 @@ pub mod api;
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod diag;
 pub mod model;
 pub mod scan;
 pub mod store;

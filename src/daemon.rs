@@ -8,7 +8,7 @@ use crate::api::AppState;
 use crate::config::Config;
 use crate::scan::walker::{ScanOptions, scan};
 use crate::store::commit::{CommitOptions, commit_scan};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -163,16 +163,23 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let app = crate::api::router(state)
         .fallback(crate::web::serve)
         .layer(tower_http::compression::CompressionLayer::new())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(access_log_layer(cfg.access_log));
 
-    let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
-    tracing::info!("duTime listening on http://{}", listener.local_addr()?);
+    let listener = tokio::net::TcpListener::bind(cfg.listen).await.with_context(|| {
+        format!("binding {} (is another duTime already running?)", cfg.listen)
+    })?;
+    let bound = listener.local_addr()?;
+    tracing::info!("duTime listening on http://{bound}");
+    if cfg.access_log {
+        tracing::info!("access log on: one line per HTTP request");
+    }
 
     // Tell systemd we are actually up. The unit declares Type=notify, so
     // without this systemd waits for a readiness signal that never arrives
     // and eventually kills a service that was working perfectly.
     notify_ready(&cfg);
     spawn_watchdog();
+    spawn_reachability_probe(bound);
     for r in &cfg.roots {
         tracing::info!(
             "  tracking {} every {}",
@@ -230,4 +237,84 @@ async fn shutdown() {
     tokio::select! { _ = ctrl_c => {}, _ = term => {} }
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
     tracing::info!("shutting down");
+}
+
+/// One log line per HTTP request, when asked for.
+///
+/// The default `TraceLayer` emits at DEBUG, which the default filter hides —
+/// so on a machine where the page will not load, the log shows a healthy
+/// service and nothing else. This makes the traffic visible on demand, and
+/// deliberately logs on *arrival* as well as on completion: a request that is
+/// logged received but never logged answered is a very different bug from one
+/// that never appears at all.
+fn access_log_layer(
+    on: bool,
+) -> tower_http::trace::TraceLayer<
+    tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
+    tower_http::trace::DefaultMakeSpan,
+    AccessLog,
+    AccessLog,
+> {
+    tower_http::trace::TraceLayer::new_for_http()
+        .on_request(AccessLog(on))
+        .on_response(AccessLog(on))
+}
+
+#[derive(Clone, Copy)]
+pub struct AccessLog(bool);
+
+impl<B> tower_http::trace::OnRequest<B> for AccessLog {
+    fn on_request(&mut self, req: &axum::http::Request<B>, _: &tracing::Span) {
+        if self.0 {
+            tracing::info!("--> {} {}", req.method(), req.uri());
+        }
+    }
+}
+
+impl<B> tower_http::trace::OnResponse<B> for AccessLog {
+    fn on_response(self, res: &axum::http::Response<B>, latency: Duration, _: &tracing::Span) {
+        if self.0 {
+            tracing::info!("<-- {} in {:.1?}", res.status().as_u16(), latency);
+        }
+    }
+}
+
+/// Check, once, whether we are reachable from off this machine.
+///
+/// duTime's own system unit sets `IPAddressAllow=localhost`, so setting
+/// `listen = "0.0.0.0:8471"` and nothing else produces a service that binds
+/// successfully, logs that it is listening, passes every health check a local
+/// operator can run — and drops every packet from the browser that is trying
+/// to reach it. Nothing in the system reports this, because dropping a packet
+/// is not an error anyone gets told about. So we go and look.
+///
+/// Runs after readiness and off the startup path: when the answer is bad, the
+/// probe is slow by definition, and a diagnostic must never be the reason a
+/// service is marked as failing to start.
+fn spawn_reachability_probe(bound: std::net::SocketAddr) {
+    let Some(target) = crate::diag::external_target(bound) else {
+        let p = bound.port();
+        tracing::info!(
+            "bound to loopback: reachable only from this machine. To reach it from \
+             elsewhere, tunnel it (ssh -N -L {p}:localhost:{p} <this-host>) or set \
+             listen = \"0.0.0.0:{p}\" — which on a system install also needs \
+             IPAddressAllow= widening in the unit; `dutime install --listen` does both."
+        );
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        let r = crate::diag::probe(target, Duration::from_secs(3));
+        if r.ok() {
+            // Deliberately not "reachable": this probe leaves from inside our
+            // own cgroup and loops back without touching the wire, so it
+            // clears systemd's filter but says nothing about a host firewall.
+            tracing::info!("self-check: {target} accepts connections (a host firewall is still untested)");
+        } else {
+            tracing::warn!(
+                "self-check FAILED: cannot connect to my own listen address {target} — {}",
+                r.advice()
+            );
+            tracing::warn!("run `dutime doctor` for the full check");
+        }
+    });
 }

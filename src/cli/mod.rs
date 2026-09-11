@@ -132,10 +132,24 @@ pub enum Cmd {
         /// Print what would be written and exit.
         #[arg(long)]
         dry_run: bool,
+        /// Bind address. Set it here rather than editing the config
+        /// afterwards: this is what keeps the unit's IPAddressAllow= in step.
+        /// A non-loopback address set in only one of the two places produces
+        /// a service that listens and is unreachable at the same time.
+        #[arg(long)]
+        listen: Option<std::net::SocketAddr>,
     },
 
     /// Check the database for internal inconsistency.
-    Doctor,
+    Doctor {
+        /// Config file, so the checks can see the configured listen address.
+        #[arg(long, short)]
+        config: Option<PathBuf>,
+        /// Skip the reachability checks (they can take a few seconds when the
+        /// answer is bad, which is the interesting case).
+        #[arg(long)]
+        no_network: bool,
+    },
 }
 
 fn parse_duration_arg(s: &str) -> Result<u64, String> {
@@ -234,7 +248,9 @@ pub fn run(cli: Cli) -> Result<()> {
             print!("{}", crate::config::Config::sample());
             Ok(())
         }
-        Cmd::Install { user, system, root, dry_run } => cmd_install(user, system, root, dry_run),
+        Cmd::Install { user, system, root, dry_run, listen } => {
+            cmd_install(user, system, root, dry_run, listen)
+        }
         Cmd::Serve { config, listen, root, interval, no_initial_scan } => {
             let mut cfg = crate::config::Config::load(config.as_deref())?;
             if let Some(db) = cli.db {
@@ -267,7 +283,14 @@ pub fn run(cli: Cli) -> Result<()> {
                 .build()?
                 .block_on(crate::daemon::serve(cfg))
         }
-        Cmd::Doctor => cmd_doctor(&db_path),
+        Cmd::Doctor { config, no_network } => {
+            // A config that names a database and a doctor that checks a
+            // different one is worse than no check: it reports health for a
+            // file the service never opens. An explicit --db still wins.
+            let cfg = crate::config::Config::load(config.as_deref())?;
+            let db = cli.db.clone().unwrap_or_else(|| cfg.db.clone());
+            cmd_doctor(&db, &cfg, !no_network)
+        }
     }
 }
 
@@ -494,9 +517,20 @@ fn cmd_scans(db_path: &Path, fmt: &Fmt, limit: i64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(db_path: &Path) -> Result<()> {
-    let store = Store::open(db_path)?;
+fn cmd_doctor(db_path: &Path, cfg: &crate::config::Config, network: bool) -> Result<()> {
     let mut problems = 0;
+
+    // Reachability comes first and never depends on the database. Someone
+    // running `doctor` because a page will not load should not be met with
+    // "no such file" from a check they did not ask about.
+    println!("{:<28} {}", "database", db_path.display());
+    if network {
+        problems += doctor_network(cfg)?;
+    }
+    println!();
+
+    let store = Store::open(db_path)
+        .with_context(|| format!("opening {} — has a scan ever run?", db_path.display()))?;
 
     let integrity: String =
         store.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
@@ -664,7 +698,13 @@ const SYSTEM_UNIT: &str = include_str!("../../packaging/dutime.service");
 /// Deliberately never runs `systemctl` itself. Installing a background service
 /// that will read your whole filesystem is something an administrator should
 /// see coming, so this writes the files, prints the two commands, and stops.
-fn cmd_install(user: bool, system: bool, roots: Vec<PathBuf>, dry_run: bool) -> Result<()> {
+fn cmd_install(
+    user: bool,
+    system: bool,
+    roots: Vec<PathBuf>,
+    dry_run: bool,
+    listen: Option<std::net::SocketAddr>,
+) -> Result<()> {
     // Default to whichever mode needs no privilege we do not already have.
     let user = if user || system { user } else { !rustix::process::geteuid().is_root() };
 
@@ -693,6 +733,10 @@ fn cmd_install(user: bool, system: bool, roots: Vec<PathBuf>, dry_run: bool) -> 
     if let Some(cut) = cfg.find("[[root]]") {
         cfg.truncate(cut);
     }
+    if let Some(l) = listen {
+        cfg = cfg.replace("listen = \"127.0.0.1:8471\"", &format!("listen = \"{l}\""));
+    }
+    let unit = apply_listen(unit, listen);
     let excludes = crate::config::default_excludes()
         .iter()
         .map(|e| format!("{e:?}"))
@@ -733,7 +777,7 @@ fn cmd_install(user: bool, system: bool, roots: Vec<PathBuf>, dry_run: bool) -> 
         std::fs::write(&cfg_path, &cfg)
             .with_context(|| format!("writing {}", cfg_path.display()))?;
     }
-    std::fs::write(&unit_path, unit)
+    std::fs::write(&unit_path, &unit)
         .with_context(|| format!("writing {}", unit_path.display()))?;
 
     let sc = if user { "systemctl --user" } else { "sudo systemctl" };
@@ -744,5 +788,256 @@ fn cmd_install(user: bool, system: bool, roots: Vec<PathBuf>, dry_run: bool) -> 
     println!("\nthen:");
     println!("  {sc} daemon-reload");
     println!("  {sc} enable --now dutime");
+    println!("\nverify it is actually reachable, which is not the same as running:");
+    println!("  dutime doctor --config {}", cfg_path.display());
     Ok(())
+}
+
+/// Keep the unit's IP filter in step with the address being bound.
+///
+/// The unit ships loopback-only on purpose — a disk inventory of the whole
+/// filesystem should not become network-visible because someone ran an
+/// install command. But when the operator does ask for a network address, the
+/// filter has to move with it, or they get a service that starts, listens,
+/// logs nothing wrong, and drops every packet. That failure is invisible from
+/// every angle an operator normally looks from, so it must not be possible to
+/// reach it by using the tool the documented way.
+fn apply_listen(unit: &str, listen: Option<std::net::SocketAddr>) -> String {
+    let Some(l) = listen else { return unit.to_string() };
+    if l.ip().is_loopback() {
+        return unit.to_string();
+    }
+    // Anything reachable enough to be worth binding is reachable from
+    // somewhere; we cannot know the client subnet, so open it and say so
+    // rather than guessing a range that silently excludes the operator.
+    unit.replace(
+        "IPAddressAllow=localhost\nIPAddressDeny=any",
+        &format!(
+            "# Relaxed by `dutime install --listen {l}`.\n\
+             # The shipped default is loopback-only:\n\
+             #   IPAddressAllow=localhost\n\
+             #   IPAddressDeny=any\n\
+             # Narrow this to your client subnet if you can, e.g.\n\
+             #   IPAddressAllow=192.168.0.0/16\n\
+             #   IPAddressDeny=any\n\
+             IPAddressAllow=any"
+        ),
+    )
+}
+
+/// Every address of this host a client might plausibly type.
+///
+/// The probe uses the routing table's choice of source address, which on a
+/// host with a VPN or several NICs is frequently not the one the operator
+/// will use. Listing them all costs nothing and removes a guess.
+fn host_addresses() -> Vec<(String, String)> {
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-o", "addr", "show", "scope", "global"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let iface = f.get(1)?;
+            let addr = f.get(3)?.split('/').next()?;
+            // Bracket IPv6 so the printed URL is one you can paste.
+            let addr =
+                if addr.contains(':') { format!("[{addr}]") } else { addr.to_string() };
+            Some((iface.to_string(), addr))
+        })
+        .collect()
+}
+
+
+
+/// Can a browser actually reach us?
+///
+/// This section exists because of a specific, humiliating failure mode that
+/// duTime shipped with: the system unit sets `IPAddressAllow=localhost`, so
+/// changing `listen` to `0.0.0.0` in the config yields a service that starts
+/// cleanly, logs that it is listening, holds an open port that `ss` and
+/// `netstat` both confirm — and silently drops every packet from the network.
+/// The operator sees a spinning tab and a perfectly healthy `systemctl
+/// status`. Nothing anywhere says why, because a dropped packet generates no
+/// error for anyone to report.
+fn doctor_network(cfg: &crate::config::Config) -> Result<usize> {
+    use crate::diag;
+    use std::time::Duration;
+
+    let mut problems = 0;
+    let listen = cfg.listen;
+
+    println!("{:<28} {listen}", "listen address");
+    println!("{:<28} {}", "access log", if cfg.access_log { "on" } else { "off (set access_log = true to log each request)" });
+
+    // What systemd will let through, which is a different question from what
+    // we bound to — and the two disagreeing is the whole point of this check.
+    let filters = systemd_ip_filters();
+    match &filters {
+        Some((unit, allow, deny)) => {
+            println!("{:<28} {unit}", "systemd unit");
+            println!("{:<28} {}", "IPAddressAllow", if allow.is_empty() { "(unset)" } else { allow });
+            println!("{:<28} {}", "IPAddressDeny", if deny.is_empty() { "(unset)" } else { deny });
+        }
+        None => {
+            println!("{:<28} not found (not installed, or not running under systemd)", "systemd unit")
+        }
+    }
+
+    // The mismatch, stated plainly.
+    if let Some((unit, allow, deny)) = &filters {
+        let filtered = !deny.is_empty();
+        let loopback_only = allow.split_whitespace().all(|a| {
+            a.starts_with("127.") || a.starts_with("::1") || a == "localhost"
+        });
+        if filtered && loopback_only && !listen.ip().is_loopback() {
+            problems += 1;
+            println!(
+                "\nPROBLEM  listen is {listen} but {unit} allows only {allow}.\n\
+                 \x20        The socket is open and every packet from the network is dropped.\n\
+                 \x20        A browser shows this as a tab that spins and never errors.\n\
+                 \x20 fix    sudo dutime install --system --listen {listen}\n\
+                 \x20        sudo systemctl daemon-reload && sudo systemctl restart dutime\n\
+                 \x20 or     add the client subnet yourself:\n\
+                 \x20        sudo systemctl edit dutime   # [Service] IPAddressAllow=192.168.0.0/16"
+            );
+        }
+    }
+
+    // Then go and actually try it, which catches everything the parsing above
+    // does not think of.
+    match diag::external_target(listen) {
+        None => {
+            println!(
+                "\n{:<28} n/a — bound to loopback, so only this machine can connect",
+                "remote reachability"
+            );
+            println!(
+                "{:<28} ssh -N -L {}:localhost:{} <this-host>   then open http://localhost:{}",
+                "  to reach it remotely",
+                listen.port(),
+                listen.port(),
+                listen.port()
+            );
+        }
+        Some(target) => {
+            print!("{:<28} {target} ... ", "remote reachability");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let r = diag::probe(target, Duration::from_secs(3));
+            if r.ok() {
+                // Say exactly what was and was not proved. This packet went
+                // over loopback and never met the external interface, so it
+                // cleared systemd's filter and told us nothing about ufw.
+                println!("ok");
+                println!(
+                    "{:<28} this leaves from this host, so it clears systemd's filter but not a firewall",
+                    "  note"
+                );
+            } else {
+                problems += 1;
+                println!("FAILED");
+                println!("{:<28} {}", "  reason", r.advice());
+            }
+            for (iface, addr) in host_addresses() {
+                println!("{:<28} http://{addr}:{}/   ({iface})", "  try", listen.port());
+            }
+        }
+    }
+
+    // A host firewall is the other half, and we cannot test it from here.
+    if let Some(state) = ufw_state() {
+        println!("{:<28} {state}", "ufw");
+    }
+    println!(
+        "{:<28} check the client is on an allowed subnet, then `sudo ufw allow <port>/tcp`",
+        "  if still unreachable"
+    );
+    println!(
+        "{:<28} duTime speaks plain HTTP — https:// to this port hangs the same way",
+        "  and check the scheme"
+    );
+
+    Ok(problems)
+}
+
+/// Our own unit's IP filtering, as systemd resolved it.
+///
+/// Asking `systemctl` rather than re-parsing the unit file: drop-ins,
+/// `systemctl edit`, and `localhost` expanding to `127.0.0.0/8 ::1/128` all
+/// mean the file on disk is not the policy in force.
+fn systemd_ip_filters() -> Option<(String, String, String)> {
+    for (unit, scope) in [("dutime.service", "--system"), ("dutime.service", "--user")] {
+        let out = std::process::Command::new("systemctl")
+            .args([scope, "show", unit, "-p", "IPAddressAllow", "-p", "IPAddressDeny", "-p", "LoadState"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let field = |k: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(k))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        if field("LoadState=") == "loaded" {
+            let label = if scope == "--user" { format!("{unit} (user)") } else { unit.to_string() };
+            return Some((label, field("IPAddressAllow="), field("IPAddressDeny=")));
+        }
+    }
+    None
+}
+
+/// ufw's own summary, when it will tell us without root.
+fn ufw_state() -> Option<String> {
+    let out = std::process::Command::new("ufw").arg("status").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if let Some(l) = text.lines().find(|l| l.starts_with("Status:")) {
+        return Some(l.trim().to_string());
+    }
+    // Without root ufw refuses; that is still worth saying, because it means
+    // "there is a ufw here and I could not see its rules".
+    Some("installed; run `sudo ufw status` to see its rules".into())
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn loopback_leaves_the_filter_alone() {
+        let u = apply_listen(SYSTEM_UNIT, Some("127.0.0.1:8471".parse().unwrap()));
+        let live = |k: &str| u.lines().any(|l| l.trim() == k);
+        assert!(live("IPAddressAllow=localhost"));
+        assert!(live("IPAddressDeny=any"));
+        assert_eq!(u, apply_listen(SYSTEM_UNIT, None));
+    }
+
+    /// The whole point: binding the network must not leave a filter behind
+    /// that drops the network.
+    #[test]
+    fn a_network_address_relaxes_the_filter() {
+        let u = apply_listen(SYSTEM_UNIT, Some("0.0.0.0:8471".parse().unwrap()));
+        // Checked per line: the replacement text *documents* the old
+        // directives in comments, so a substring search cannot tell a live
+        // setting from a commented one.
+        let live = |k: &str| u.lines().any(|l| l.trim() == k);
+        assert!(!live("IPAddressDeny=any"), "deny survived:\n{u}");
+        assert!(live("IPAddressAllow=any"), "allow not applied:\n{u}");
+        // and it must still be a unit, not shredded
+        assert!(u.contains("ExecStart=/usr/bin/dutime serve"));
+    }
+
+    /// The string being patched has to exist, or the substitution is a no-op
+    /// that reintroduces the bug in silence.
+    #[test]
+    fn the_shipped_unit_contains_what_we_patch() {
+        assert!(
+            SYSTEM_UNIT.contains("IPAddressAllow=localhost\nIPAddressDeny=any"),
+            "the unit's IP filter lines moved; apply_listen is now a no-op"
+        );
+    }
 }
