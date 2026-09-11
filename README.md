@@ -136,6 +136,14 @@ so you can see which of thirty siblings is the one creeping up before deciding
 which to open. Then the same directory decomposed into its largest children as
 a stacked area.
 
+Those trends have two scales, because they answer different questions.
+**Per row** gives each its own range and shows *shape* — a directory quietly
+doubling from 40 MB looks as dramatic as one adding 400 GB, which is the point
+when you are hunting for something starting to run away. **Shared** puts every
+row on one scale from zero, so a given height means the same number of bytes
+in every row and the consequential movers are obvious. The choice is
+remembered and travels in the permalink.
+
 ![Explorer](docs/explorer.png)
 
 **Changes** — biggest gainers and losers over any window, exclusive or

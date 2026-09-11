@@ -92,6 +92,17 @@
         <h2>Contents</h2>
         <p class="sub" id="listSub">Everything in this directory, with its recent trend.</p>
       </figcaption>
+      <div class="rowctl">
+        <div class="seg" role="group" aria-label="Trend scale">
+          <span>Trend</span>
+          <div>
+            <button data-spark="relative" class="on"
+                    title="Each trend scaled to its own range — shows the shape of every row, including small ones">Per row</button>
+            <button data-spark="absolute"
+                    title="Every trend on one scale from zero — heights are comparable, so the biggest movers stand out">Shared</button>
+          </div>
+        </div>
+      </div>
       <div id="listing"></div>
     </figure>
 

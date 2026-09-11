@@ -23,6 +23,10 @@ const state = {
   mode: 'exclusive',
   listSort: 'size',
   listDesc: true,
+  /// 'relative' scales each trend to its own range; 'absolute' puts them all
+  /// on one scale from zero. Remembered per browser, since which question you
+  /// are asking tends to be a habit rather than a per-visit decision.
+  sparkScale: localStorage.getItem('dutime.sparkScale') || 'relative',
   dir: 'gainers',
   collapse: true,
   view: 'overview',
@@ -641,20 +645,38 @@ async function loadSeries() {
  * 200 children would otherwise mean 200 ECharts instances, each with its own
  * canvas and resize observer.
  *
- * Scaled to each row's own min and max, which is the usual sparkline
- * convention — it shows *shape*, and rows here differ by orders of magnitude,
- * so a shared scale would flatten every small directory to a dead line. The
- * magnitude is not left to the picture: the size and change columns carry the
- * real figures, and the title gives the range.
+ * Two scales, because they answer different questions and neither answers
+ * both.
+ *
+ * **Per row** (`domain` omitted) scales each row to its own min and max. It
+ * shows *shape*: rows here differ by orders of magnitude, so one shared scale
+ * flattens every small directory to a dead line, and a directory quietly
+ * doubling from 40 MB is exactly the thing you want to catch early.
+ *
+ * **Shared** takes an explicit domain covering every row, so a given height
+ * means the same number of bytes everywhere and the biggest movers are
+ * obvious at a glance. That domain starts at **zero**, not at the smallest
+ * value across the rows: these marks are filled areas, and a filled area on a
+ * non-zero baseline overstates every difference — 380 GB and 420 GB would
+ * render as a tenfold gap. Per-row mode accepts that distortion knowingly in
+ * exchange for showing shape; shared mode exists to compare magnitudes, so it
+ * cannot.
+ *
+ * In neither mode is the magnitude left to the picture: the size and change
+ * columns carry the real figures and the row title gives the range.
  */
-function sparkSvg(vals, w = 132, h = 24) {
+function sparkSvg(vals, domain = null, w = 132, h = 24) {
   const pad = 2;
   if (!vals || vals.length === 0) return '';
-  const min = Math.min(...vals), max = Math.max(...vals);
+  const min = domain ? domain.min : Math.min(...vals);
+  const max = domain ? domain.max : Math.max(...vals);
   const span = max - min;
   const iw = w - pad * 2, ih = h - pad * 2;
 
   // A directory that never moved gets a flat rule, not a spike from noise.
+  // Only when the *domain* is degenerate, though: in shared mode an unchanged
+  // row still has a meaningful height, and drawing it mid-chart would put a
+  // 2 MB directory level with a 400 GB one.
   if (span === 0) {
     const y = (h / 2).toFixed(1);
     return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">`
@@ -698,10 +720,20 @@ async function loadListing() {
   const sortAttr = (k) =>
     state.listSort === k ? ` aria-sort="${state.listDesc ? 'descending' : 'ascending'}"` : '';
 
+  // One domain for every row, from zero to the largest value any row reaches.
+  // Computed over the rows actually shown, so hiding or truncating entries
+  // cannot leave the scale pinned to something that is not on screen.
+  const shared = state.sparkScale === 'absolute';
+  const ceiling = shared
+    ? Math.max(0, ...rows.flatMap((r) => r.spark || []))
+    : 0;
+  const domain = shared ? { min: 0, max: ceiling } : null;
+
   const body = rows.map((r) => {
     const dirish = r.kind === 'dir';
     const range = r.spark && r.spark.length
       ? `${fmtSize(r.spark[0])} → ${fmtSize(r.spark[r.spark.length - 1])}`
+        + (shared ? ` (of ${fmtSize(ceiling)} full height)` : '')
       : '';
     const count = dirish ? `${fmtCount(r.dirs)} dirs, ${fmtCount(r.files)} files` : '';
     const countExact = dirish
@@ -713,7 +745,7 @@ async function loadListing() {
       </td>
       <td class="num sz">${fmtSize(r.size)}</td>
       <td class="num dl ${r.delta > 0 ? 'up' : r.delta < 0 ? 'down' : ''}">${r.delta ? fmtDelta(r.delta) : '—'}</td>
-      <td class="trend" title="${range}">${sparkSvg(r.spark)}</td>
+      <td class="trend" title="${range}">${sparkSvg(r.spark, domain)}</td>
       <td class="num ct" title="${countExact}">${count}</td>
     </tr>`;
   }).join('');
@@ -763,7 +795,11 @@ async function loadListing() {
 
   $('#listSub').textContent =
     `${rows.length.toLocaleString()} entries · trend covers ${fmtTime(d.from.at)} to ${fmtTime(d.to.at)}`
-    + (d.window_clamped_to_first_scan ? ' (all the history there is)' : '');
+    + (d.window_clamped_to_first_scan ? ' (all the history there is)' : '')
+    // A shared scale is only readable if you are told what it is.
+    + (shared
+      ? ` · trends share one scale, 0 to ${fmtSize(ceiling)}`
+      : ' · each trend scaled to its own range');
 
   $$('#listing tr.clickable').forEach((tr) => {
     const go = () => {
@@ -778,6 +814,8 @@ async function loadListing() {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
     });
   });
+
+  $$('[data-spark]').forEach((b) => b.classList.toggle('on', b.dataset.spark === state.sparkScale));
 
   $$('#listing th.sortable').forEach((th) => th.addEventListener('click', () => {
     const k = th.dataset.sort;
@@ -888,6 +926,11 @@ function syncHash() {
   if (state.path && state.path !== state.rootPath) p.set('path', state.path);
   if (state.window !== '-24h') p.set('window', state.window);
   if (state.metric !== 'apparent') p.set('metric', state.metric);
+  // Travels in the link: a shared-scale listing is the thing worth pasting
+  // into a ticket, and it does not read the same at the default.
+  if (state.view === 'explorer' && state.sparkScale !== 'relative') {
+    p.set('spark', state.sparkScale);
+  }
   if (state.view === 'compare') {
     // A comparison is the thing most worth sharing: "look at what happened
     // between these two moments" is the whole point of the view.
@@ -906,6 +949,7 @@ function readHash() {
   if (p.get('path')) state.path = p.get('path');
   if (p.get('window')) state.window = p.get('window');
   if (p.get('metric')) state.metric = p.get('metric');
+  if (['relative', 'absolute'].includes(p.get('spark'))) state.sparkScale = p.get('spark');
   state.diffFrom = p.get('from');
   state.diffTo = p.get('to');
 }
@@ -947,6 +991,17 @@ async function init() {
     state.metric = b.dataset.metric;
     $$('.seg [data-metric]').forEach((x) => x.classList.toggle('on', x === b));
     refresh();
+  }));
+
+  $$('.seg [data-spark]').forEach((b) => b.addEventListener('click', () => {
+    state.sparkScale = b.dataset.spark;
+    try { localStorage.setItem('dutime.sparkScale', state.sparkScale); } catch { /* private mode */ }
+    $$('.seg [data-spark]').forEach((x) => x.classList.toggle('on', x === b));
+    // The scale is a drawing decision, not a different question for the
+    // server — but the listing is built in one pass, so re-render it. Only
+    // when it is on screen: the control lives inside the Explorer.
+    if (state.view === 'explorer') loadListing();
+    syncHash();
   }));
 
   $$('.seg [data-mode]').forEach((b) => b.addEventListener('click', () => {
@@ -1045,6 +1100,8 @@ async function boot() {
     wsel.value = state.window;
     $$('.seg [data-metric]').forEach((b) =>
       b.classList.toggle('on', b.dataset.metric === state.metric));
+    $$('.seg [data-spark]').forEach((b) =>
+      b.classList.toggle('on', b.dataset.spark === state.sparkScale));
     switchView(state.view);
   } catch (e) {
     toast(e.message);
