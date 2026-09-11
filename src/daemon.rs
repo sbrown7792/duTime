@@ -101,6 +101,7 @@ impl Scheduler {
         opts.track_file_min_bytes = root.track_file_min_bytes;
         opts.one_filesystem = root.one_filesystem;
         opts.exclude = root.exclude.clone();
+        opts.exclude_prefixes = root.exclude_paths.clone();
         opts.threads = self.cfg.threads;
 
         let started_at = crate::cli::now();

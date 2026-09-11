@@ -361,3 +361,84 @@ fn cross_directory_hardlink_is_credited_once_at_root_scope() {
         assert!(r.tree.resolve(&parts).is_none(), "{gone} should have no entity");
     }
 }
+
+/// The shipped default excludes must not eat a user's directories.
+///
+/// Gitignore patterns are anchored to the *scan root*, not to the filesystem
+/// root, so shipping `/snap/` as a default "exclude the system snap mount"
+/// pattern actually excluded `$HOME/snap` — 71,516 files and 19 GB of real
+/// data on a stock Ubuntu desktop, silently missing from every total and
+/// every growth report. Absolute system paths now travel separately, as
+/// literal prefixes.
+#[test]
+fn default_excludes_do_not_shadow_same_named_user_directories() {
+    let td = fixture();
+    // Names that collide with the absolute system paths duTime skips.
+    for dir in ["snap", "tmp", "run", "proc", "dev"] {
+        build_collider(td.path(), dir);
+    }
+    let truth = du_apparent(td.path());
+
+    let mut opts = ScanOptions::new(td.path());
+    opts.exclude = dutime::config::default_excludes();
+    opts.exclude_prefixes = dutime::config::default_exclude_paths();
+
+    let r = scan(&opts).expect("scan");
+    let roll = r.tree.rollup();
+    assert_eq!(
+        roll.bytes[0], truth,
+        "the default excludes dropped user data: a root-relative pattern matched \
+         a directory that merely shares a name with a system path"
+    );
+}
+
+/// Absolute excludes still work when they really are inside the root.
+#[test]
+fn absolute_excludes_apply_when_genuinely_inside_the_root() {
+    let td = fixture();
+    build_collider(td.path(), "skipme");
+    let with_all = du_apparent(td.path());
+
+    let mut opts = ScanOptions::new(td.path());
+    opts.exclude_prefixes = vec![td.path().join("skipme")];
+    let r = scan(&opts).expect("scan");
+    let roll = r.tree.rollup();
+
+    assert!(
+        roll.bytes[0] < with_all,
+        "an absolute exclude inside the root should have removed something"
+    );
+    assert!(
+        (0..r.tree.len()).all(|i| r.tree.name[i] != std::ffi::OsString::from("skipme")),
+        "the excluded directory should not appear at all"
+    );
+}
+
+/// A root deliberately placed inside an excluded prefix must still scan.
+///
+/// Otherwise configuring `/tmp/scratch` as a root would return an empty tree,
+/// because `/tmp` is on the default skip list — obeying the default over an
+/// explicit request.
+#[test]
+fn an_explicitly_configured_root_beats_a_containing_exclude() {
+    let td = fixture();
+    let inner = td.path().join("inner");
+    build_collider(td.path(), "inner");
+
+    let mut opts = ScanOptions::new(&inner);
+    opts.exclude_prefixes = vec![td.path().to_path_buf(), inner.clone()];
+    let r = scan(&opts).expect("scan");
+    let roll = r.tree.rollup();
+
+    assert_eq!(roll.bytes[0], du_apparent(&inner));
+    assert!(roll.bytes[0] > 0, "explicitly asking for this root must return its contents");
+}
+
+fn build_collider(root: &Path, name: &str) {
+    let d = root.join(name);
+    fs::create_dir_all(d.join("sub")).unwrap();
+    let mut f = fs::File::create(d.join("payload.bin")).unwrap();
+    f.write_all(&vec![b'z'; 3 << 20]).unwrap();
+    let mut g = fs::File::create(d.join("sub/small.txt")).unwrap();
+    g.write_all(b"hello").unwrap();
+}

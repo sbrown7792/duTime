@@ -39,8 +39,11 @@ pub struct RootConfig {
     pub one_filesystem: bool,
     /// Files at least this large become tracked entities in their own right.
     pub track_file_min_bytes: i64,
-    /// Gitignore-syntax patterns. A bare pattern excludes; `!` re-includes.
+    /// Gitignore-syntax patterns, matched relative to this root. A bare
+    /// pattern excludes; `!` re-includes.
     pub exclude: Vec<String>,
+    /// Absolute paths never to descend into.
+    pub exclude_paths: Vec<PathBuf>,
 }
 
 impl Default for RootConfig {
@@ -51,24 +54,38 @@ impl Default for RootConfig {
             one_filesystem: true,
             track_file_min_bytes: 1 << 20,
             exclude: default_excludes(),
+            exclude_paths: default_exclude_paths(),
         }
     }
 }
 
-/// Paths not worth tracking on a typical Linux host.
+/// Relative patterns worth skipping under any root.
 ///
-/// `/snap` is excluded not because of its device but because its contents are
-/// a decompressed view of squashfs images already counted under
-/// `/var/lib/snapd/snaps` — counting both reports 19 GB twice.
+/// These are matched *relative to the scan root*, so they must never be
+/// absolute system paths. Writing `/snap/` here would mean `<root>/snap` —
+/// which, scanning `$HOME` on Ubuntu, silently drops 71,516 files and 19 GB of
+/// real user data. Absolute paths go in [`default_exclude_paths`].
 pub fn default_excludes() -> Vec<String> {
+    ["**/.cache/thumbnails/", "**/*.sock"].iter().map(|s| s.to_string()).collect()
+}
+
+/// Absolute paths not worth tracking on a typical Linux host.
+///
+/// Most of these are already skipped by the filesystem-type denylist, since
+/// they are separate virtual mounts — but `/tmp` and `/var/tmp` are ordinary
+/// directories on many installs, and listing the rest costs nothing and makes
+/// the intent legible.
+///
+/// `/snap` is here not because of its device but because its contents are a
+/// decompressed view of squashfs images already counted under
+/// `/var/lib/snapd/snaps` — counting both reports the same 19 GB twice.
+pub fn default_exclude_paths() -> Vec<PathBuf> {
     [
-        "/proc/", "/sys/", "/dev/", "/run/", "/tmp/", "/var/tmp/", "/snap/",
-        "/var/lib/docker/overlay2/", "/var/lib/snapd/cache/",
-        "**/.cache/thumbnails/",
-        "**/*.sock",
+        "/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap",
+        "/var/lib/docker/overlay2", "/var/lib/snapd/cache",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(PathBuf::from)
     .collect()
 }
 
@@ -115,6 +132,9 @@ impl Config {
             if r.exclude.is_empty() {
                 r.exclude = default_excludes();
             }
+            if r.exclude_paths.is_empty() {
+                r.exclude_paths = default_exclude_paths();
+            }
         }
         Ok(cfg)
     }
@@ -143,7 +163,10 @@ one_filesystem = true
 # Files at least this big get tracked individually. On a typical machine 1 MiB
 # covers ~95% of all bytes with ~3% of the file count.
 track_file_min_bytes = 1048576
+# Relative to this root -- "/snap/" here would mean "/home/snap", not the
+# system /snap. Absolute paths belong in exclude_paths.
 exclude = ["**/.cache/thumbnails/", "**/node_modules/.cache/", "**/*.sock"]
+exclude_paths = ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap"]
 
 # [[root]]
 # path = "/var"

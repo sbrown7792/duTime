@@ -40,10 +40,21 @@ pub struct ScanOptions {
     /// 36x reduction in tracked file entities for a 5% loss of resolution.
     pub track_file_min_bytes: i64,
     pub one_filesystem: bool,
-    /// Gitignore-syntax patterns. A bare pattern excludes; a `!` prefix
-    /// re-includes. Note this is gitignore semantics, *not* ripgrep `--glob`
-    /// semantics, where a bare pattern would whitelist.
+    /// Gitignore-syntax patterns, matched *relative to the scan root*. A bare
+    /// pattern excludes; a `!` prefix re-includes. Note this is gitignore
+    /// semantics, not ripgrep `--glob` semantics where a bare pattern would
+    /// whitelist.
+    ///
+    /// Because these are root-relative, a pattern like `/snap/` does **not**
+    /// mean the system `/snap`: scanning `$HOME` it would match
+    /// `$HOME/snap`, silently dropping 19 GB of real user data. Absolute
+    /// system paths belong in [`ScanOptions::exclude_prefixes`].
     pub exclude: Vec<String>,
+    /// Absolute paths never to descend into, matched as literal prefixes.
+    ///
+    /// This is the right home for `/proc`, `/tmp` and friends: an absolute
+    /// path means the same thing regardless of which root is being scanned.
+    pub exclude_prefixes: Vec<PathBuf>,
     pub threads: usize,
 }
 
@@ -54,6 +65,7 @@ impl ScanOptions {
             track_file_min_bytes: 1 << 20,
             one_filesystem: true,
             exclude: Vec::new(),
+            exclude_prefixes: Vec::new(),
             threads: default_threads(),
         }
     }
@@ -104,8 +116,20 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
         Default::default()
     };
 
+    // Keep only absolute excludes that fall strictly inside this root.
+    //
+    // A prefix that *contains* the root is deliberately ignored: if someone
+    // configures /snap/foo as a root, they have explicitly asked for it, and
+    // silently returning an empty tree would be worse than useless.
+    let prefixes: Vec<PathBuf> = opts
+        .exclude_prefixes
+        .iter()
+        .filter(|p| p.starts_with(&root) && p.as_path() != root)
+        .cloned()
+        .collect();
+
     let matcher = build_matcher(&root, &opts.exclude)?;
-    let (raw, n_errors) = walk(&root, root_dev, opts, &skip, &matcher)?;
+    let (raw, n_errors) = walk(&root, root_dev, opts, &skip, &matcher, &prefixes)?;
     let mut out = assemble(&root, raw, opts, skip);
     out.stats.n_errors = n_errors;
     Ok(out)
@@ -131,6 +155,7 @@ fn walk(
     opts: &ScanOptions,
     skip: &std::collections::HashSet<PathBuf>,
     matcher: &Gitignore,
+    prefixes: &[PathBuf],
 ) -> anyhow::Result<(Vec<RawEntry>, i64)> {
     let (tx, rx) = mpsc::channel::<RawEntry>();
     let collector = std::thread::spawn(move || rx.into_iter().collect::<Vec<_>>());
@@ -155,6 +180,7 @@ fn walk(
             let root = root.clone();
             let skip = skip.clone();
             let matcher = matcher.clone();
+            let prefixes = prefixes.to_vec();
             let n_errors = n_errors.clone();
             Box::new(move |res| {
                 use ignore::WalkState;
@@ -169,6 +195,9 @@ fn walk(
 
                 // Never descend into a hazardous or duplicative mount point.
                 if skip.contains(path) {
+                    return WalkState::Skip;
+                }
+                if path != root && prefixes.iter().any(|p| path.starts_with(p)) {
                     return WalkState::Skip;
                 }
 
