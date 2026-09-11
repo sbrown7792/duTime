@@ -40,6 +40,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/tree", get(tree))
         .route("/api/v1/diff", get(diff))
         .route("/api/v1/series", get(series))
+        .route("/api/v1/listing", get(listing))
         .route("/api/v1/gainers", get(gainers))
         .with_state(state)
 }
@@ -962,4 +963,273 @@ async fn gainers(State(s): State<Arc<AppState>>, Query(q): Query<GainersQ>) -> A
         }))
     })
     .await
+}
+
+
+// ── directory listing with trend sparklines ──────────────────────────────
+
+#[derive(Deserialize)]
+struct ListingQ {
+    root: Option<RootId>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    at: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    metric: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    /// How many points each sparkline carries.
+    #[serde(default)]
+    points: Option<usize>,
+}
+
+/// One row per child: what it is now, how it changed, and its recent shape.
+///
+/// The listing answers a different question from the treemap. A treemap is
+/// good at "what is big"; it is poor at "is this one creeping up", because a
+/// rectangle that grew 8% looks like a rectangle. A sorted list with a trend
+/// beside each row lets you see which of thirty sibling directories is the one
+/// moving, before deciding which to open.
+///
+/// Sparklines are computed the same way the stacked area is: seed each child
+/// with its size at the start of the window, then attribute every event in the
+/// window to whichever child contains it. Cost tracks churn, not tree size.
+async fn listing(State(s): State<Arc<AppState>>, Query(q): Query<ListingQ>) -> ApiResult {
+    blocking(move || {
+        let root = s.pick_root(q.root)?;
+        let metric = metric_of(&q.metric);
+        let (s2, at2) = s.pick_scan(root, &q.at)?;
+
+        // Clamp to the first scan rather than reaching past the start of
+        // history, which would report the baseline's births as growth.
+        let (s1, at1, clamped) = {
+            let store = s.read();
+            let now = crate::cli::now();
+            let want = match crate::cli::timespec::parse(
+                q.from.as_deref().unwrap_or("-7d"),
+                now,
+            )? {
+                crate::cli::timespec::Target::Scan(id) => {
+                    let at = store.conn.query_row(
+                        "SELECT started_at FROM scan WHERE scan_id = ?1",
+                        [id],
+                        |r| r.get(0),
+                    )?;
+                    Some((id, at))
+                }
+                crate::cli::timespec::Target::At(t) => query::resolve_scan(&store, root, t)?,
+            };
+            match want {
+                Some((id, at)) if id <= s2 => (id, at, false),
+                _ => {
+                    let (id, at) = store
+                        .first_scan(root)?
+                        .ok_or_else(|| anyhow::anyhow!("no scans recorded"))?;
+                    (id, at, true)
+                }
+            }
+        };
+
+        let snap = s.snapshot(root, s2)?;
+        let base = s.snapshot(root, s1)?;
+        let node = locate(&snap, q.path.as_deref())?;
+        let limit = q.limit.unwrap_or(500).min(5000);
+        let points = q.points.unwrap_or(32).clamp(2, 240);
+
+        let size_of = |sn: &Snapshot, i: u32| -> i64 {
+            match metric {
+                Metric::Allocated => sn.incl_blocks[i as usize],
+                Metric::Apparent => sn.incl_bytes[i as usize],
+            }
+        };
+
+        let mut kids: Vec<u32> = snap.children[node as usize].clone();
+        kids.sort_by_key(|&c| std::cmp::Reverse(size_of(&snap, c)));
+        kids.truncate(limit);
+
+        // Seed from the snapshot at the window's start rather than a query
+        // per child: snapshots are cached, so this is a lookup each.
+        let mut level: Vec<i64> = kids
+            .iter()
+            .map(|&c| base.idx(snap.ids[c as usize]).map(|i| size_of(&base, i)).unwrap_or(0))
+            .collect();
+
+        let spark = sparklines(&s, root, &snap, node, &kids, s1, s2, metric, &mut level, points)?;
+
+        let own_now = match metric {
+            Metric::Allocated => snap.own_blocks[node as usize],
+            Metric::Apparent => snap.own_bytes[node as usize],
+        };
+        let own_then = base
+            .idx(snap.ids[node as usize])
+            .map(|i| match metric {
+                Metric::Allocated => base.own_blocks[i as usize],
+                Metric::Apparent => base.own_bytes[i as usize],
+            })
+            .unwrap_or(0);
+
+        let rows: Vec<Value> = kids
+            .iter()
+            .enumerate()
+            .map(|(bi, &c)| {
+                let i = c as usize;
+                let now = size_of(&snap, c);
+                let then = base
+                    .idx(snap.ids[i])
+                    .map(|k| size_of(&base, k))
+                    .unwrap_or(0);
+                let mut v = name_json(&snap.name[i]);
+                let o = v.as_object_mut().unwrap();
+                o.insert("id".into(), json!(snap.ids[i]));
+                o.insert("kind".into(), json!(kind_str(snap.kind[i])));
+                o.insert("size".into(), json!(now));
+                o.insert("before".into(), json!(then));
+                o.insert("delta".into(), json!(now - then));
+                o.insert("files".into(), json!(snap.incl_files[i]));
+                o.insert("dirs".into(), json!(snap.incl_dirs[i]));
+                o.insert("spark".into(), json!(spark[bi]));
+                v
+            })
+            .collect();
+
+        Ok(json!({
+            "root_id": root,
+            "path": path_json(&snap.path_of(node)),
+            "total": size_of(&snap, node),
+            "from": { "scan_id": s1, "at": at1 },
+            "to": { "scan_id": s2, "at": at2 },
+            "window_clamped_to_first_scan": clamped,
+            "truncated": snap.children[node as usize].len().saturating_sub(kids.len()),
+            "own": {
+                "size": own_now,
+                "delta": own_now - own_then,
+                "files": snap.own_files[node as usize],
+            },
+            "rows": rows,
+        }))
+    })
+    .await
+}
+
+/// Per-child value series across the window, downsampled to `points`.
+///
+/// `level` arrives holding each child's size at the start of the window and is
+/// advanced in place as the window's events are replayed.
+#[allow(clippy::too_many_arguments)]
+fn sparklines(
+    s: &AppState,
+    root: RootId,
+    snap: &Snapshot,
+    node: u32,
+    kids: &[u32],
+    s1: ScanId,
+    s2: ScanId,
+    metric: Metric,
+    level: &mut [i64],
+    points: usize,
+) -> anyhow::Result<Vec<Vec<i64>>> {
+    let store = s.read();
+
+    let mut band_of: std::collections::HashMap<PathId, usize> = Default::default();
+    for (bi, &k) in kids.iter().enumerate() {
+        band_of.insert(snap.ids[k as usize], bi);
+    }
+
+    // Parent links covering everything alive at any point in the window.
+    //
+    // The end-of-window snapshot is not enough: a directory deleted mid-window
+    // emits its large negative event and then vanishes from the tree, so its
+    // delta would be dropped and the child it belonged to would keep bytes
+    // that no longer exist.
+    let mut parent_of: std::collections::HashMap<PathId, Option<PathId>> = Default::default();
+    {
+        let mut ps = store.conn.prepare(
+            "SELECT path_id, parent_id FROM path
+             WHERE root_id = ?1 AND born_scan <= ?2
+               AND (died_scan IS NULL OR died_scan > ?3)",
+        )?;
+        let rows = ps.query_map([root, s2, s1], |r| {
+            Ok((r.get::<_, PathId>(0)?, r.get::<_, Option<PathId>>(1)?))
+        })?;
+        for row in rows {
+            let (id, par) = row?;
+            parent_of.insert(id, par);
+        }
+    }
+    let node_id = snap.ids[node as usize];
+
+    let mut st = store.conn.prepare(
+        "SELECT scan_id FROM scan
+         WHERE root_id = ?1 AND scan_id >= ?2 AND scan_id <= ?3 AND status = 'ok'
+         ORDER BY scan_id",
+    )?;
+    let scan_ids: Vec<ScanId> = st
+        .query_map([root, s1, s2], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut ev = store.conn.prepare(
+        "SELECT e.scan_id, e.path_id, e.d_bytes, e.d_blocks
+         FROM size_event e JOIN path p ON p.path_id = e.path_id
+         WHERE p.root_id = ?1 AND e.scan_id > ?2 AND e.scan_id <= ?3",
+    )?;
+    let mut by_scan: std::collections::HashMap<ScanId, Vec<(usize, i64)>> = Default::default();
+    let rows = ev.query_map([root, s1, s2], |r| {
+        Ok((
+            r.get::<_, ScanId>(0)?,
+            r.get::<_, PathId>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (sid, pid, db, dk) = row?;
+        let d = if metric == Metric::Allocated { dk } else { db };
+        if d == 0 {
+            continue;
+        }
+        // Climb until we land on one of the listed children.
+        let mut cur = pid;
+        let mut band = None;
+        loop {
+            if let Some(&b) = band_of.get(&cur) {
+                band = Some(b);
+                break;
+            }
+            if cur == node_id {
+                break; // the directory's own files, not any child
+            }
+            match parent_of.get(&cur) {
+                Some(Some(p)) => cur = *p,
+                _ => break,
+            }
+        }
+        if let Some(b) = band {
+            by_scan.entry(sid).or_default().push((b, d));
+        }
+    }
+
+    let n = scan_ids.len().max(1);
+    let mut out: Vec<Vec<i64>> = vec![Vec::with_capacity(points.min(n)); kids.len()];
+    let mut last_bucket = usize::MAX;
+    for (i, sid) in scan_ids.iter().enumerate() {
+        if let Some(deltas) = by_scan.get(sid) {
+            for &(b, d) in deltas {
+                level[b] += d;
+            }
+        }
+        // Record once per bucket, plus always the final sample so the
+        // sparkline's right-hand end is the current value rather than
+        // whatever the last bucket boundary happened to be.
+        let bucket = i * points / n;
+        if bucket != last_bucket || i + 1 == scan_ids.len() {
+            last_bucket = bucket;
+            for (b, o) in out.iter_mut().enumerate() {
+                o.push(level[b]);
+            }
+        }
+    }
+    Ok(out)
 }

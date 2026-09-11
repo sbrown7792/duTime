@@ -21,6 +21,8 @@ const state = {
   scans: [],
   scanIdx: 0,
   mode: 'exclusive',
+  listSort: 'size',
+  listDesc: true,
   dir: 'gainers',
   collapse: true,
   view: 'overview',
@@ -384,6 +386,7 @@ async function loadTreemap() {
     const parts = p.treePathInfo.slice(1).map((n) => n.name);
     state.path = joinPath(t.path.name, parts);
     loadTreemap();
+    loadListing();
     loadSeries();
   });
 
@@ -409,6 +412,7 @@ function renderCrumbs() {
   $$('#crumbs button').forEach((b) => b.addEventListener('click', () => {
     state.path = b.dataset.path;
     loadTreemap();
+    loadListing();
     loadSeries();
   }));
 }
@@ -478,6 +482,135 @@ async function loadSeries() {
         <td class="num ${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${fmtDelta(d)}</td>
       </tr>`;
     }).join('')}</tbody></table>`;
+}
+
+// ── directory listing ──────────────────────────────────────────────────
+
+/** An inline sparkline as plain SVG.
+ *
+ * One tiny SVG per row rather than a chart instance per row: a directory with
+ * 200 children would otherwise mean 200 ECharts instances, each with its own
+ * canvas and resize observer.
+ *
+ * Scaled to each row's own min and max, which is the usual sparkline
+ * convention — it shows *shape*, and rows here differ by orders of magnitude,
+ * so a shared scale would flatten every small directory to a dead line. The
+ * magnitude is not left to the picture: the size and change columns carry the
+ * real figures, and the title gives the range.
+ */
+function sparkSvg(vals, w = 132, h = 24) {
+  const pad = 2;
+  if (!vals || vals.length === 0) return '';
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = max - min;
+  const iw = w - pad * 2, ih = h - pad * 2;
+
+  // A directory that never moved gets a flat rule, not a spike from noise.
+  if (span === 0) {
+    const y = (h / 2).toFixed(1);
+    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">`
+      + `<line x1="${pad}" y1="${y}" x2="${w - pad}" y2="${y}" `
+      + `stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" opacity="0.55"/></svg>`;
+  }
+
+  const x = (i) => pad + (vals.length === 1 ? iw : (i * iw) / (vals.length - 1));
+  const y = (v) => pad + ih - ((v - min) / span) * ih;
+  const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area = `${pad},${(h - pad).toFixed(1)} ${pts} ${(w - pad).toFixed(1)},${(h - pad).toFixed(1)}`;
+  const lx = x(vals.length - 1).toFixed(1), ly = y(vals[vals.length - 1]).toFixed(1);
+
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">`
+    + `<polygon points="${area}" fill="var(--s1)" opacity="0.12"/>`
+    + `<polyline points="${pts}" fill="none" stroke="var(--s1)" stroke-width="1.5" `
+    + `stroke-linejoin="round" stroke-linecap="round"/>`
+    + `<circle cx="${lx}" cy="${ly}" r="2" fill="var(--s1)"/></svg>`;
+}
+
+const KIND_ICON = { dir: '\u{1F4C1}', file: '\u{1F4C4}', symlink: '\u{21B3}', other: '\u{2022}' };
+
+async function loadListing() {
+  let d;
+  try {
+    d = await api('listing', { path: state.path, from: state.window, points: 40, limit: 400 });
+  } catch (e) {
+    $('#listing').innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  const rows = d.rows.slice();
+  const key = state.listSort;
+  rows.sort((a, b) => {
+    const v = key === 'name'
+      ? String(a.name).localeCompare(String(b.name))
+      : (a[key] ?? 0) - (b[key] ?? 0);
+    return state.listDesc ? -v : v;
+  });
+
+  const sortAttr = (k) =>
+    state.listSort === k ? ` aria-sort="${state.listDesc ? 'descending' : 'ascending'}"` : '';
+
+  const body = rows.map((r) => {
+    const dirish = r.kind === 'dir';
+    const range = r.spark && r.spark.length
+      ? `${fmtSize(r.spark[0])} → ${fmtSize(r.spark[r.spark.length - 1])}`
+      : '';
+    const count = dirish
+      ? `${r.dirs.toLocaleString()} dirs, ${r.files.toLocaleString()} files`
+      : '';
+    return `<tr class="${dirish ? 'clickable' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}">
+      <td class="name" title="${escapeHtml(r.name)}">
+        <span class="ico">${KIND_ICON[r.kind] || ''}</span>${escapeHtml(r.name)}${r.lossy ? ' <span title="filename is not valid UTF-8">⚠</span>' : ''}
+      </td>
+      <td class="num sz">${fmtSize(r.size)}</td>
+      <td class="num dl ${r.delta > 0 ? 'up' : r.delta < 0 ? 'down' : ''}">${r.delta ? fmtDelta(r.delta) : '—'}</td>
+      <td class="trend" title="${range}">${sparkSvg(r.spark)}</td>
+      <td class="num ct">${count}</td>
+    </tr>`;
+  }).join('');
+
+  const own = d.own && d.own.size > 0
+    ? `<tr class="own">
+         <td class="name">files in this directory${d.own.files ? ` (${d.own.files.toLocaleString()})` : ''}</td>
+         <td class="num sz">${fmtSize(d.own.size)}</td>
+         <td class="num dl ${d.own.delta > 0 ? 'up' : d.own.delta < 0 ? 'down' : ''}">${d.own.delta ? fmtDelta(d.own.delta) : '—'}</td>
+         <td class="trend"></td><td class="num ct"></td>
+       </tr>`
+    : '';
+
+  const more = d.truncated
+    ? `<div class="more">${d.truncated.toLocaleString()} smaller entries not shown</div>`
+    : '';
+
+  $('#listing').innerHTML = rows.length || own
+    ? `<div class="listing"><table>
+        <thead><tr>
+          <th class="name sortable"${sortAttr('name')} data-sort="name">Name</th>
+          <th class="num sz sortable"${sortAttr('size')} data-sort="size">Size</th>
+          <th class="num dl sortable"${sortAttr('delta')} data-sort="delta">Change</th>
+          <th class="trend">Trend</th>
+          <th class="num ct">Contents</th>
+        </tr></thead>
+        <tbody>${body}${own}</tbody>
+      </table>${more}</div>`
+    : '<div class="empty">This directory is empty, or everything in it is below the tracking threshold.</div>';
+
+  $('#listSub').textContent =
+    `${rows.length.toLocaleString()} entries · trend covers ${fmtTime(d.from.at)} to ${fmtTime(d.to.at)}`
+    + (d.window_clamped_to_first_scan ? ' (all the history there is)' : '');
+
+  $$('#listing tr.clickable').forEach((tr) => tr.addEventListener('click', () => {
+    state.path = joinPath(state.path || state.rootPath, [tr.dataset.name]);
+    loadTreemap();
+    loadListing();
+    loadSeries();
+  }));
+
+  $$('#listing th.sortable').forEach((th) => th.addEventListener('click', () => {
+    const k = th.dataset.sort;
+    if (state.listSort === k) state.listDesc = !state.listDesc;
+    else { state.listSort = k; state.listDesc = k !== 'name'; }
+    loadListing();
+  }));
 }
 
 // ── diff treemap ───────────────────────────────────────────────────────
@@ -560,7 +693,7 @@ async function loadDiff() {
 async function refresh() {
   try {
     if (state.view === 'overview') await loadOverview();
-    else if (state.view === 'explorer') { await loadTreemap(); await loadSeries(); }
+    else if (state.view === 'explorer') { await loadTreemap(); await loadListing(); await loadSeries(); }
     else if (state.view === 'changes') await loadGainers('#changesTable', 100);
     else if (state.view === 'compare') await loadDiff();
   } catch (e) {
@@ -671,7 +804,7 @@ async function init() {
     state.scanIdx = Number(e.target.value);
     updateTimeLabel();
   });
-  $('#timeSlider').addEventListener('change', () => loadTreemap());
+  $('#timeSlider').addEventListener('change', () => { loadTreemap(); loadListing(); });
 
   $('#diffFrom').addEventListener('change', () => { loadDiff(); syncHash(); });
   $('#diffTo').addEventListener('change', () => { loadDiff(); syncHash(); });

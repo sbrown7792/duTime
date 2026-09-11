@@ -282,3 +282,115 @@ async fn non_utf8_names_round_trip_through_json() {
         .unwrap();
     assert_eq!(raw, b"weird-\xff\xfe-dir", "the exact filename bytes must survive");
 }
+
+/// Each row's sparkline must end at the size the row reports.
+///
+/// The sparkline is replayed forward from the window's start while the size
+/// comes from the end-of-window snapshot. If those two disagree the trend is
+/// decorative rather than true, which is worse than having no trend at all.
+#[tokio::test]
+async fn listing_sparklines_end_at_the_reported_size() {
+    let mut f = Fixture::new();
+    f.write("alpha/a.bin", 4 << 20);
+    f.write("beta/b.bin", 9 << 20);
+    f.write("gamma/c.bin", 2 << 20);
+    f.snapshot();
+    f.write("alpha/a.bin", 30 << 20);
+    f.snapshot();
+    f.write("beta/extra.bin", 5 << 20);
+    f.snapshot();
+    fs::remove_dir_all(f.root.join("gamma")).unwrap();
+    f.write("alpha/a.bin", 12 << 20);
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d&points=16", enc(&root))).await;
+
+    let rows = l["rows"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for r in rows {
+        let spark = r["spark"].as_array().unwrap();
+        assert!(!spark.is_empty(), "{} has no sparkline", r["name"]);
+        assert_eq!(
+            spark.last().unwrap().as_i64().unwrap(),
+            r["size"].as_i64().unwrap(),
+            "sparkline for {} does not end at its reported size",
+            r["name"]
+        );
+        assert_eq!(
+            r["delta"].as_i64().unwrap(),
+            r["size"].as_i64().unwrap() - r["before"].as_i64().unwrap()
+        );
+    }
+}
+
+/// Rows plus the directory's own files must account for the whole directory.
+#[tokio::test]
+async fn listing_rows_account_for_the_whole_directory() {
+    let mut f = Fixture::new();
+    for i in 0..6 {
+        f.write(&format!("d{i}/f.bin"), (3 << 20) + i);
+    }
+    // Loose files in the root, below the tracking threshold.
+    f.write("note.txt", 4096);
+    f.write("other.txt", 8192);
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d", enc(&root))).await;
+
+    let rows: i64 = l["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["size"].as_i64().unwrap())
+        .sum();
+    let own = l["own"]["size"].as_i64().unwrap();
+    assert!(own > 0, "loose files should be reported as the directory's own");
+    assert_eq!(
+        rows + own,
+        l["total"].as_i64().unwrap(),
+        "children plus own files must equal the directory total"
+    );
+}
+
+/// A child deleted mid-window must not leave phantom bytes in its sparkline.
+///
+/// Same failure mode as the stacked area: the deleted path is absent from the
+/// end-of-window snapshot, so an attribution walk that only consults that
+/// snapshot drops its negative delta.
+#[tokio::test]
+async fn listing_sparkline_reflects_a_mid_window_deletion() {
+    let mut f = Fixture::new();
+    f.write("keep/a.bin", 2 << 20);
+    f.write("keep/doomed/big.bin", 40 << 20);
+    f.snapshot();
+    f.snapshot();
+    fs::remove_dir_all(f.root.join("keep/doomed")).unwrap();
+    f.snapshot();
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d&points=8", enc(&root))).await;
+    let keep = l["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "keep")
+        .expect("keep should be listed");
+
+    let spark: Vec<i64> = keep["spark"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert!(spark[0] >= 40 << 20, "should start large, got {}", spark[0]);
+    assert!(
+        *spark.last().unwrap() < 8 << 20,
+        "the deletion never showed up in the trend: ends at {}",
+        spark.last().unwrap()
+    );
+    assert_eq!(*spark.last().unwrap(), keep["size"].as_i64().unwrap());
+    assert!(keep["delta"].as_i64().unwrap() <= -(40 << 20));
+}
