@@ -111,13 +111,42 @@ impl Default for Config {
     }
 }
 
+/// Turn a TOML error into one that says what to do.
+///
+/// The table names in this file are field names, not labels — every tracked
+/// directory is another `[[root]]`. That is not obvious, and guessing wrong
+/// produces a service that refuses to start, so the error has to say it
+/// rather than leaving the reader to infer it from a list of valid fields.
+fn explain(path: &std::path::Path, e: toml::de::Error) -> anyhow::Error {
+    let mut msg = format!("parsing config {}: {e}", path.display());
+    if e.message().contains("unknown field") {
+        msg.push_str(
+            "\n\nnote: the names in [brackets] are fixed field names, not labels you choose.\n\
+             To track another directory, add a second [[root]] block and change its path:\n\
+             \n\
+             \x20   [[root]]\n\
+             \x20   path = \"/srv\"\n\
+             \x20   interval_s = 3600\n\
+             \n\
+             \x20   [[root]]\n\
+             \x20   path = \"/mnt/media\"\n\
+             \x20   interval_s = 3600\n\
+             \n\
+             Each root is scanned and stored independently, and the web UI gets a\n\
+             picker to switch between them. Check a file before restarting with\n\
+             `dutime config --check <file>`.",
+        );
+    }
+    anyhow::anyhow!(msg)
+}
+
 impl Config {
     pub fn load(path: Option<&std::path::Path>) -> Result<Self> {
         let mut cfg = match path {
             Some(p) => {
                 let raw = std::fs::read_to_string(p)
                     .with_context(|| format!("reading config {}", p.display()))?;
-                toml::from_str(&raw).with_context(|| format!("parsing config {}", p.display()))?
+                toml::from_str(&raw).map_err(|e| explain(p, e))?
             }
             None => Config::default(),
         };
@@ -194,10 +223,17 @@ track_file_min_bytes = 1048576
 exclude = ["**/.cache/thumbnails/", "**/node_modules/.cache/", "**/*.sock"]
 exclude_paths = ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap"]
 
+# Track as many directories as you like: each one is another [[root]] block.
+# The name in brackets is a fixed field name, not a label -- [[media]] or
+# [[drive2]] will be rejected. Roots are scanned and stored independently, and
+# the web UI gets a picker to switch between them.
+#
 # [[root]]
-# path = "/var"
+# path = "/mnt/media"
 # interval_s = 3600
-# exclude = ["/var/lib/docker/overlay2/**", "/var/lib/snapd/cache/**"]
+# A big, slow, rarely-changing drive wants a coarser threshold: tracking every
+# 1 MiB file on a media volume is a lot of rows about things that never move.
+# track_file_min_bytes = 104857600
 "#
         .to_string()
     }
@@ -242,5 +278,53 @@ mod tests {
     #[test]
     fn root_default_interval_is_hourly() {
         assert_eq!(RootConfig::default().interval_s, 3600);
+    }
+
+    /// Several roots is the ordinary case, not a special one.
+    #[test]
+    fn multiple_roots_parse() {
+        let c: Config = toml::from_str(
+            r#"
+listen = "127.0.0.1:8471"
+[[root]]
+path = "/"
+interval_s = 3600
+[[root]]
+path = "/mnt/media"
+interval_s = 300
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.roots.len(), 2);
+        assert_eq!(c.roots[1].path, PathBuf::from("/mnt/media"));
+        assert_eq!(c.roots[1].interval_s, 300);
+    }
+
+    /// Renaming the table is the natural mistake — it looks like a label —
+    /// and the error has to teach the fix, not just reject the file.
+    #[test]
+    fn a_renamed_root_table_explains_itself() {
+        let err = Config::load(Some(&write_tmp(
+            "renamed.toml",
+            "[[root]]\npath = \"/\"\n\n[[media]]\npath = \"/mnt/media\"\n",
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `media`"), "{err}");
+        assert!(err.contains("[[root]]"), "no fix offered: {err}");
+        assert!(err.contains("not labels you choose"), "{err}");
+    }
+
+    /// A valid file must not acquire the hint.
+    #[test]
+    fn a_good_config_is_not_lectured() {
+        let p = write_tmp("fine.toml", "[[root]]\npath = \"/\"\n");
+        assert!(Config::load(Some(&p)).is_ok());
+    }
+
+    fn write_tmp(name: &str, body: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("dutime-cfgtest-{name}"));
+        std::fs::write(&p, body).unwrap();
+        p
     }
 }

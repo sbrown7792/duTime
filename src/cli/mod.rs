@@ -134,7 +134,11 @@ pub enum Cmd {
     },
 
     /// Print a commented starter configuration.
-    Config,
+    Config {
+        /// Validate this file instead, and print what it resolves to.
+        #[arg(long, value_name = "FILE")]
+        check: Option<PathBuf>,
+    },
 
     /// Write a systemd unit and a starter config.
     Install {
@@ -264,10 +268,13 @@ pub fn run(cli: Cli) -> Result<()> {
             !no_collapse,
         ),
         Cmd::Scans { limit } => cmd_scans(&db_path, &fmt, limit),
-        Cmd::Config => {
-            print!("{}", crate::config::Config::sample());
-            Ok(())
-        }
+        Cmd::Config { check } => match check {
+            None => {
+                print!("{}", crate::config::Config::sample());
+                Ok(())
+            }
+            Some(p) => cmd_config_check(&p),
+        },
         Cmd::Install { user, system, root, dry_run, listen } => {
             cmd_install(user, system, root, dry_run, listen)
         }
@@ -1028,6 +1035,92 @@ fn ufw_state() -> Option<String> {
     // Without root ufw refuses; that is still worth saying, because it means
     // "there is a ufw here and I could not see its rules".
     Some("installed; run `sudo ufw status` to see its rules".into())
+}
+
+
+
+/// Parse a config and print what it actually resolves to.
+///
+/// Editing `/etc/dutime/config.toml` and finding out whether it was valid by
+/// restarting the service is a bad loop: the feedback is a failed unit and a
+/// journal entry. This gives the answer directly, and shows the resolved
+/// values rather than only reporting the absence of an error — a config that
+/// parses can still track a directory you did not mean, and the defaults that
+/// get filled in are not visible in the file.
+fn cmd_config_check(path: &Path) -> Result<()> {
+    let cfg = crate::config::Config::load(Some(path))?;
+    println!("{:<28} {}", "config", path.display());
+    println!("{:<28} ok", "parse");
+    println!("{:<28} {}", "listen", cfg.listen);
+    println!("{:<28} {}", "database", cfg.db.display());
+    println!("{:<28} {}", "walker threads", cfg.threads);
+    println!("{:<28} {}", "access log", if cfg.access_log { "on" } else { "off" });
+
+    if cfg.roots.is_empty() {
+        println!("\nno [[root]] blocks: nothing would be tracked");
+        anyhow::bail!("config tracks nothing");
+    }
+
+    println!("\n{} root(s):", cfg.roots.len());
+    for r in &cfg.roots {
+        let exists = r.path.is_dir();
+        println!(
+            "\n  {}{}",
+            r.path.display(),
+            if exists { "" } else { "   [does not exist or is not a directory]" }
+        );
+        println!("    {:<22} {}", "interval", humantime::format_duration(
+            std::time::Duration::from_secs(r.interval_s)
+        ));
+        println!("    {:<22} {}", "track files over", ByteSize(r.track_file_min_bytes as u64));
+        println!("    {:<22} {}", "one filesystem", r.one_filesystem);
+        println!("    {:<22} {}", "exclude", fmt_list(&r.exclude));
+        // Show only the absolute excludes that bear on *this* root. The
+        // defaults include /tmp and /proc, and printing them verbatim under a
+        // root like /tmp/media reads as "this root is excluded" when the
+        // walker will in fact ignore a prefix that contains its own root.
+        let (applies, inert): (Vec<_>, Vec<_>) = r
+            .exclude_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .partition(|p| {
+                let p = Path::new(p);
+                p.starts_with(&r.path) && p != r.path
+            });
+        println!("    {:<22} {}", "exclude_paths", fmt_list(&applies));
+        if !inert.is_empty() {
+            println!("    {:<22} {} (outside this root)", "  not applicable", inert.len());
+        }
+    }
+
+    // A root inside another root is scanned twice and reported twice. It is
+    // legal, so this is a warning rather than a failure, but it is almost
+    // never what someone means.
+    for a in &cfg.roots {
+        for b in &cfg.roots {
+            if a.path != b.path && a.path.starts_with(&b.path) {
+                println!(
+                    "\nwarning: {} is inside {} — both are scanned, so its bytes are counted \
+                     under each",
+                    a.path.display(),
+                    b.path.display()
+                );
+            }
+        }
+    }
+
+    let missing: Vec<_> = cfg.roots.iter().filter(|r| !r.path.is_dir()).collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "{} root(s) do not exist — the service will start but they will never scan",
+            missing.len()
+        );
+    }
+    Ok(())
+}
+
+fn fmt_list(v: &[String]) -> String {
+    if v.is_empty() { "(none)".into() } else { v.join(", ") }
 }
 
 #[cfg(test)]

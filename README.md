@@ -211,6 +211,36 @@ Exclusions use gitignore syntax, but duTime deliberately never reads
 `.gitignore` files off disk — `target/` and `node_modules/` are precisely what
 you are trying to find.
 
+**Tracking several directories** means several `[[root]]` blocks. The name in
+brackets is a fixed field name, not a label you choose, so `[[media]]` is
+rejected:
+
+```toml
+[[root]]
+path = "/"
+interval_s = 3600
+
+[[root]]
+path = "/mnt/media"
+interval_s = 3600
+```
+
+Each root is scanned, stored and checkpointed independently — different
+intervals and thresholds per root are fine — and the web UI gets a picker to
+switch between them.
+
+Check a file before restarting anything:
+
+```console
+$ dutime config --check /etc/dutime/config.toml
+```
+
+It prints the resolved settings rather than only reporting the absence of an
+error: the defaults that get filled in are not visible in the file, and a
+config that parses can still track a directory you did not mean. It warns
+about a root nested inside another (legal, but its bytes are then counted
+under both) and exits non-zero if a root does not exist.
+
 ## Troubleshooting
 
 ### The service is running but the page just spins
