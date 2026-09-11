@@ -224,7 +224,10 @@ impl Scheduler {
                 examples.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
                 if n_errors > examples.len() as i64 { ", ..." } else { "" }
             );
-            tracing::warn!("{}", permission_advice(root_fstype.as_deref()));
+            tracing::warn!(
+                "{}",
+                permission_advice_for(root_fstype.as_deref(), Some(&root.path))
+            );
         }
         Ok(())
     }
@@ -490,7 +493,7 @@ fn explain_empty_scan(
 
     if n_errors > 0 {
         tracing::warn!("  - {n_errors} path(s) could not be read (see the warning below)");
-        tracing::warn!("    {}", permission_advice(root_fstype));
+        tracing::warn!("    {}", permission_advice_for(root_fstype, Some(root)));
     } else {
         // Worth stating explicitly: it removes the most-suspected cause.
         tracing::warn!(
@@ -562,14 +565,21 @@ fn explain_empty_scan(
 ///
 /// Sending someone to check a capability that was never going to help costs
 /// them an afternoon, so the filesystem type picks the message.
-fn permission_advice(root_fstype: Option<&str>) -> String {
+/// The same advice, with the concrete uids when a path is available.
+///
+/// "make the uid match" is the correct fix and still leaves the reader two
+/// lookups away from acting on it. Both numbers are obtainable — `stat` on a
+/// directory works without permission to read it, which is precisely the
+/// case here — so duTime names them and the fix becomes a single edit.
+fn permission_advice_for(root_fstype: Option<&str>, root: Option<&std::path::Path>) -> String {
+    let uids = root.and_then(uid_mismatch).unwrap_or_default();
     match root_fstype {
         Some(fs) if crate::scan::mounts::is_server_authorized(fs) => format!(
             "this root is on {fs}, where permissions are enforced by the SERVER against the \
              uid/gid duTime presents — CAP_DAC_READ_SEARCH does nothing here, and root_squash \
              means running as root reads less, not more. Fix it by making the uid match: run \
              duTime as the user that owns the files, or grant that uid access on the server \
-             (for a mode-700 directory, no group or capability will do)."
+             (for a mode-700 directory, no group or capability will do).{uids}"
         ),
         Some(fs) => format!(
             "this root is on {fs} (a local filesystem), so CAP_DAC_READ_SEARCH does grant \
@@ -593,7 +603,7 @@ mod advice_tests {
     #[test]
     fn a_network_filesystem_is_not_sent_to_check_capabilities() {
         for fs in ["nfs", "nfs4", "cifs", "smb3", "ceph", "afs"] {
-            let a = permission_advice(Some(fs));
+            let a = permission_advice_for(Some(fs), None);
             assert!(a.contains("SERVER"), "{fs}: {a}");
             assert!(a.contains("uid"), "{fs}: {a}");
             assert!(
@@ -607,7 +617,7 @@ mod advice_tests {
     #[test]
     fn a_local_filesystem_is_told_the_capability_helps() {
         for fs in ["ext4", "btrfs", "xfs", "zfs", "vfat"] {
-            let a = permission_advice(Some(fs));
+            let a = permission_advice_for(Some(fs), None);
             assert!(a.contains("does grant"), "{fs}: {a}");
             assert!(a.contains("AmbientCapabilities"), "{fs}: {a}");
             assert!(!a.contains("SERVER"), "{fs} got the network advice: {a}");
@@ -617,9 +627,101 @@ mod advice_tests {
     /// Saying nothing confidently is better than saying the wrong thing.
     #[test]
     fn an_unknown_filesystem_hedges_rather_than_guesses() {
-        let a = permission_advice(None);
+        let a = permission_advice_for(None, None);
         assert!(a.contains("could not determine"), "{a}");
         // It still has to mention both cases, or it is no help at all.
         assert!(a.contains("local") && a.contains("NFS"), "{a}");
+    }
+}
+
+/// " duTime runs as uid N; this root is owned by uid M (mode 0700)." — or
+/// nothing, when they already match or the root cannot be stat-ed.
+///
+/// Saying nothing when the uids agree matters: on a share where the uid is
+/// already right, the failure is something else entirely, and a line about
+/// uids would be a confident red herring.
+fn uid_mismatch(root: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(root).ok()?;
+    let ours = rustix::process::geteuid().as_raw();
+    let theirs = m.uid();
+    if ours == theirs {
+        return None;
+    }
+    // A directory that grants "other" read *and* execute is readable by
+    // everyone, so a differing owner is not what is blocking the scan.
+    // Claiming otherwise would point at a uid that was never the problem.
+    if m.mode() & 0o005 == 0o005 {
+        return None;
+    }
+    Some(format!(
+        " Here that means: duTime runs as uid {ours}, this root is owned by uid {theirs} \
+         with mode {:04o}{}. Set `User=` in `systemctl edit dutime` to the account with \
+         uid {theirs}.",
+        m.mode() & 0o7777,
+        if m.mode() & 0o077 == 0 {
+            ", which grants group and other nothing, so only that uid can read it"
+        } else {
+            ""
+        }
+    ))
+}
+
+#[cfg(test)]
+mod uid_tests {
+    use super::*;
+
+    /// A share owned by somebody else and closed to others must name both
+    /// numbers: "make the uid match" leaves the reader two lookups from
+    /// acting on it.
+    #[test]
+    fn a_foreign_owner_is_named_by_number() {
+        // /root is uid 0, mode 0700, and the test process is not root.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let a = permission_advice_for(Some("nfs4"), Some(std::path::Path::new("/root")));
+        assert!(a.contains("owned by uid 0"), "{a}");
+        assert!(a.contains("systemctl edit dutime"), "{a}");
+        assert!(a.contains("SERVER"), "{a}");
+    }
+
+    /// A world-readable directory is not blocked by its owner, so pointing at
+    /// the uid would send someone to change the one thing that is fine.
+    #[test]
+    fn a_world_readable_directory_is_not_blamed_on_the_uid() {
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        // /proc is uid 0 but mode 0555.
+        let a = permission_advice_for(Some("nfs4"), Some(std::path::Path::new("/proc")));
+        assert!(
+            !a.contains("duTime runs as uid"),
+            "blamed the uid for a directory everyone can read: {a}"
+        );
+    }
+
+    /// When the uids already agree the failure is something else, and a line
+    /// about uids would be a confident red herring.
+    #[test]
+    fn a_matching_owner_says_nothing_about_uids() {
+        let dir = tempfile::Builder::new().prefix("dutime-uid-").tempdir().unwrap();
+        let a = permission_advice_for(Some("nfs4"), Some(dir.path()));
+        assert!(!a.contains("duTime runs as uid"), "invented a uid mismatch: {a}");
+        // The rest of the network advice still applies.
+        assert!(a.contains("SERVER"), "{a}");
+    }
+
+    /// A mode that grants the group nothing is worth calling out, since the
+    /// obvious fix — add duTime to the owning group — cannot work.
+    #[test]
+    fn a_mode_700_directory_says_the_group_will_not_help() {
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let a = permission_advice_for(Some("nfs4"), Some(std::path::Path::new("/root")));
+        if a.contains("duTime runs as uid") {
+            assert!(a.contains("grants group and other nothing"), "{a}");
+        }
     }
 }

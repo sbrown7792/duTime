@@ -309,9 +309,24 @@ uid match: run duTime as the user that owns the files, or grant duTime's uid
 access on the server. For a mode-700 directory no group membership will do
 it either, since 700 grants nothing to the group.
 
-duTime works this out for itself: it records the filesystem type of each root
-and the permission advice it prints names that type, so you are never sent to
-check a capability that could not have helped.
+duTime works this out for itself: it records the filesystem type of each root,
+names that type in the advice it prints, and — when the owner is the problem —
+names both uids, so the fix is a single edit rather than two lookups:
+
+```
+this root is on nfs4, where permissions are enforced by the SERVER against the
+uid/gid duTime presents … Here that means: duTime runs as uid 998, this root is
+owned by uid 33 with mode 0700, which grants group and other nothing, so only
+that uid can read it. Set `User=` in `systemctl edit dutime` to the account
+with uid 33.
+```
+
+A note on NFS export squashing, since it is the setting people reach for
+first: squashing only *remaps* uids. "No mapping" (`no_root_squash`) passes
+every uid through unchanged, which is what you want when matching the uid —
+but on its own it grants duTime nothing, because its uid still is not the
+owner's. "Map all users to admin" (`all_squash` with `anonuid`) would grant
+access, at the price of every client on that export reading as the owner.
 
 ```console
 $ systemctl show dutime -p AmbientCapabilities
