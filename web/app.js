@@ -54,6 +54,21 @@ function fmtDelta(n) {
   return (n > 0 ? '+' : '−') + fmtSize(Math.abs(n));
 }
 
+/** Item counts, compactly.
+ *
+ * A directory with 895,930 files under it does not need nine characters
+ * spent on the last three digits — nobody reads a file count to the unit,
+ * and at these magnitudes the exact figure changes between one scan and the
+ * next anyway. Below 10,000 the exact number is short enough to keep, so it
+ * is kept. The precise value always survives in the row's tooltip.
+ */
+function fmtCount(n) {
+  if (n < 10_000) return n.toLocaleString();
+  if (n < 1_000_000) return `${Math.round(n / 1000).toLocaleString()}k`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  return `${(n / 1_000_000_000).toFixed(1)}B`;
+}
+
 function fmtTime(epoch) {
   const d = new Date(epoch * 1000);
   return d.toLocaleString(undefined, {
@@ -554,8 +569,9 @@ async function loadListing() {
     const range = r.spark && r.spark.length
       ? `${fmtSize(r.spark[0])} → ${fmtSize(r.spark[r.spark.length - 1])}`
       : '';
-    const count = dirish
-      ? `${r.dirs.toLocaleString()} dirs, ${r.files.toLocaleString()} files`
+    const count = dirish ? `${fmtCount(r.dirs)} dirs, ${fmtCount(r.files)} files` : '';
+    const countExact = dirish
+      ? `${r.dirs.toLocaleString()} directories, ${r.files.toLocaleString()} files`
       : '';
     return `<tr class="${dirish ? 'clickable' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}"${dirish ? ' tabindex="0"' : ''}>
       <td class="name" title="${escapeHtml(r.name)}">
@@ -564,7 +580,7 @@ async function loadListing() {
       <td class="num sz">${fmtSize(r.size)}</td>
       <td class="num dl ${r.delta > 0 ? 'up' : r.delta < 0 ? 'down' : ''}">${r.delta ? fmtDelta(r.delta) : '—'}</td>
       <td class="trend" title="${range}">${sparkSvg(r.spark)}</td>
-      <td class="num ct">${count}</td>
+      <td class="num ct" title="${countExact}">${count}</td>
     </tr>`;
   }).join('');
 
@@ -587,7 +603,7 @@ async function loadListing() {
 
   const own = d.own && d.own.size > 0
     ? `<tr class="own">
-         <td class="name">files in this directory${d.own.files ? ` (${d.own.files.toLocaleString()})` : ''}</td>
+         <td class="name">files in this directory${d.own.files ? ` (${fmtCount(d.own.files)})` : ''}</td>
          <td class="num sz">${fmtSize(d.own.size)}</td>
          <td class="num dl ${d.own.delta > 0 ? 'up' : d.own.delta < 0 ? 'down' : ''}">${d.own.delta ? fmtDelta(d.own.delta) : '—'}</td>
          <td class="trend"></td><td class="num ct"></td>

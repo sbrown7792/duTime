@@ -267,9 +267,18 @@ tr:last-child td { border-bottom: none; }
 /* The name column absorbs the slack; every other column is pinned, or the
    unsized one silently swallows hundreds of pixels under table-layout:fixed. */
 .listing td.name, .listing th.name { width: auto; }
-.listing td.sz, .listing th.sz { width: 92px; }
-.listing td.dl, .listing th.dl { width: 104px; }
-.listing td.ct, .listing th.ct { width: 92px; }
+.listing td.sz, .listing th.sz { width: 94px; }
+.listing td.dl, .listing th.dl { width: 106px; }
+/* 170px fits the widest realistic value (measured: "1,338 dirs, 9,999 files"
+   is 142px at 13px, plus 20px of cell padding). Anything beyond that clips
+   cleanly rather than escaping the card. */
+.listing td.ct, .listing th.ct { width: 170px; }
+
+/* Clip rather than spill. `table-layout: fixed` sizes the column but does
+   not contain it, so a cell whose content is wider -- 895,930 files, a
+   filename with no spaces -- runs out past the edge of the card. Nothing
+   below should depend on every value happening to fit. */
+.listing td, .listing th { overflow: hidden; text-overflow: ellipsis; }
 
 .listing .flat { color: var(--text-muted); font-size: 11px; }
 .listing .more { padding: 9px 10px; font-size: 12px; color: var(--text-muted); }
