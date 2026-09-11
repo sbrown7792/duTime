@@ -314,6 +314,17 @@ Two other things stop a directory being scanned, and neither is a permission:
   the mount boundary, so a data drive needs its own `[[root]]`.
 - **An exclude.** `dutime config --check` lists what applies to each root.
 
+**A root whose data is on a mount below it is never silent.** With
+`one_filesystem = true` (the default) a scan stops at each filesystem
+boundary, so a root at `/media/nextcloud` whose data drive is mounted at
+`/media/nextcloud/data` records the directory and nothing else. The daemon now
+names the filesystems it declined to cross, and a scan that comes back with
+almost nothing prints the candidate reasons — unreadable paths, crossed
+mounts, excludes, the file threshold — with what that scan actually observed
+against each. `dutime scan <root> --dry-run` shows the same from the CLI; run
+it as the service user (`sudo -u dutime`) or you are testing your own
+permissions rather than duTime's.
+
 **An unreadable path is never silent.** Everything beneath it is simply absent
 from the total, which is indistinguishable from a real shrink unless somebody
 says so — so the scan is recorded as `partial`, the daemon logs a warning

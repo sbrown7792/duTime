@@ -9,6 +9,8 @@ use crate::config::Config;
 use crate::scan::walker::{ScanOptions, scan};
 use crate::store::commit::{CommitOptions, commit_scan};
 use anyhow::{Context, Result};
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -42,11 +44,16 @@ impl Scheduler {
         // into a backlog that never drains and eventually thrashes the disk
         // it was supposed to be monitoring quietly.
         let running = Arc::new(AtomicBool::new(false));
+        // Mounts under this root that the walk will not cross. Announced when
+        // first seen and whenever the set changes, not every hour: skipping
+        // another filesystem is correct behaviour, but it silently leaves its
+        // bytes out of the total, so it must be said once rather than never.
+        let announced: Arc<Mutex<Option<Vec<PathBuf>>>> = Arc::new(Mutex::new(None));
         let mut overruns: u32 = 0;
         let mut backoff: u32 = 1;
 
         if self.cfg.scan_on_start {
-            self.scan_once(&root, &running).await;
+            self.scan_once(&root, &running, &announced).await;
         }
 
         loop {
@@ -71,7 +78,7 @@ impl Scheduler {
                 continue;
             }
 
-            if self.scan_once(&root, &running).await {
+            if self.scan_once(&root, &running, &announced).await {
                 // Recover as soon as scans fit in the interval again.
                 overruns = 0;
                 if backoff > 1 {
@@ -82,9 +89,14 @@ impl Scheduler {
         }
     }
 
-    async fn scan_once(&self, root: &crate::config::RootConfig, running: &Arc<AtomicBool>) -> bool {
+    async fn scan_once(
+        &self,
+        root: &crate::config::RootConfig,
+        running: &Arc<AtomicBool>,
+        announced: &Arc<Mutex<Option<Vec<PathBuf>>>>,
+    ) -> bool {
         running.store(true, Ordering::SeqCst);
-        let res = self.do_scan(root).await;
+        let res = self.do_scan(root, announced).await;
         running.store(false, Ordering::SeqCst);
         match res {
             Ok(()) => true,
@@ -95,7 +107,11 @@ impl Scheduler {
         }
     }
 
-    async fn do_scan(&self, root: &crate::config::RootConfig) -> Result<()> {
+    async fn do_scan(
+        &self,
+        root: &crate::config::RootConfig,
+        announced: &Arc<Mutex<Option<Vec<PathBuf>>>>,
+    ) -> Result<()> {
         let mut opts = ScanOptions::new(&root.path);
         opts.track_file_min_bytes = root.track_file_min_bytes;
         opts.one_filesystem = root.one_filesystem;
@@ -119,6 +135,10 @@ impl Scheduler {
         // Read before `r` moves into the commit closure.
         let n_errors = r.stats.n_errors;
         let examples = r.stats.unreadable.clone();
+        let skipped = r.stats.skipped_mounts.clone();
+        let other_fs = r.stats.other_filesystems.clone();
+        let n_entities = r.tree.len();
+        let n_dirs = r.stats.n_dirs;
 
         let state = self.state.clone();
         let canon = opts.root.canonicalize().unwrap_or(opts.root.clone());
@@ -148,6 +168,43 @@ impl Scheduler {
         // total, so a quiet scan here would report a shrink that never
         // happened. Warn, and name paths: the fix is a permission, and you
         // cannot grant a permission to a count.
+        // Announce the *other filesystems* once, and again if the set
+        // changes. Deliberately not the fstype-denied mounts: a scan of /
+        // skips 89 of those — every snap image and every virtual filesystem —
+        // and dumping them hourly would train anyone reading the log to skip
+        // past exactly the place a real finding appears. Their count goes in
+        // the same line; the paths are a debug-level detail.
+        {
+            let mut seen = announced.lock().unwrap();
+            if seen.as_deref() != Some(other_fs.as_slice()) {
+                if !other_fs.is_empty() {
+                    tracing::info!(
+                        root = %root.path.display(),
+                        "not crossing {} filesystem(s) mounted under this root, so their \
+                         bytes are NOT in its total: {}. Give one its own [[root]] to track \
+                         it, or set one_filesystem = false to fold it in.",
+                        other_fs.len(),
+                        other_fs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                    );
+                } else if seen.is_some() {
+                    tracing::info!(
+                        root = %root.path.display(),
+                        "no separate filesystems are mounted under this root any more"
+                    );
+                }
+                *seen = Some(other_fs.clone());
+            }
+        }
+        if !skipped.is_empty() {
+            tracing::debug!(
+                root = %root.path.display(),
+                "also skipped {} virtual or duplicate mount(s): {}",
+                skipped.len(),
+                skipped.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            );
+        }
+
+        explain_empty_scan(&root.path, n_entities, n_dirs, n_errors, &other_fs, &opts);
         if n_errors > 0 {
             tracing::warn!(
                 root = %root.path.display(),
@@ -383,4 +440,101 @@ fn spawn_reachability_probe(bound: std::net::SocketAddr) {
             tracing::warn!("run `dutime doctor` for the full check");
         }
     });
+}
+
+/// Say why a scan found nothing, at the moment it finds nothing.
+///
+/// "scan complete root=/media/nextcloud events=1 born=1" is a success message
+/// describing a failure. One entity is the root directory and nothing else,
+/// and the log line reads the same whether the volume is genuinely empty, was
+/// unreadable, sits behind a mount the walk declined to cross, or was
+/// excluded. Every one of those has a different fix, and none of them is
+/// discoverable from that line.
+///
+/// So: when a scan of a whole volume comes back with almost nothing, print
+/// the candidate reasons together with what this scan actually observed.
+fn explain_empty_scan(
+    root: &std::path::Path,
+    n_entities: usize,
+    n_dirs: i64,
+    n_errors: i64,
+    other_fs: &[std::path::PathBuf],
+    opts: &ScanOptions,
+) {
+    // A root holding only itself, or a couple of directories and no tracked
+    // file, is the shape worth questioning. A genuinely empty volume trips
+    // this too, and saying so once per scan of an empty volume is a much
+    // smaller cost than the alternative.
+    if n_entities > 4 && n_dirs > 2 {
+        return;
+    }
+
+    tracing::warn!(
+        root = %root.display(),
+        entities = n_entities,
+        "this scan found almost nothing ({n_entities} tracked entit{}). If that volume is \
+         not actually empty, one of the following is why:",
+        if n_entities == 1 { "y" } else { "ies" }
+    );
+
+    if n_errors > 0 {
+        tracing::warn!("  - {n_errors} path(s) could not be read (see the warning below)");
+    } else {
+        // Worth stating explicitly: it removes the most-suspected cause.
+        tracing::warn!(
+            "  - not permissions: every path duTime tried was readable, so the capability \
+             is working"
+        );
+    }
+
+    if !other_fs.is_empty() {
+        tracing::warn!(
+            "  - THIS IS THE LIKELY ONE: {} separate filesystem(s) are mounted under this \
+             root and were not crossed: {}. Give the one holding your data its own \
+             [[root]], or set one_filesystem = false on this root.",
+            other_fs.len(),
+            other_fs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
+    } else if opts.one_filesystem {
+        tracing::warn!(
+            "  - not a nested mount: nothing under this root is on a different device, so \
+             one_filesystem is not what is hiding it"
+        );
+    }
+
+    // Count only the absolute excludes that fall under this root. The
+    // defaults list /proc, /tmp and friends, and offering all nine as
+    // suspects when none of them is inside this volume is a false lead.
+    let applicable: Vec<&std::path::PathBuf> = opts
+        .exclude_prefixes
+        .iter()
+        .filter(|p| p.starts_with(root) && p.as_path() != root)
+        .collect();
+    if !opts.exclude.is_empty() || !applicable.is_empty() {
+        tracing::warn!(
+            "  - {} exclude pattern(s){} are in force; check them with \
+             `dutime config --check`",
+            opts.exclude.len(),
+            if applicable.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " and {} excluded path(s) inside this root ({})",
+                    applicable.len(),
+                    applicable.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )
+            }
+        );
+    }
+
+    tracing::warn!(
+        "  - files under {} bytes are not tracked individually, but directories always are, \
+         so a tree of small files would still show its directories",
+        opts.track_file_min_bytes
+    );
+    tracing::warn!(
+        "  to see it from duTime's own point of view, run as the service user: \
+         sudo -u dutime dutime scan {} --dry-run",
+        root.display()
+    );
 }

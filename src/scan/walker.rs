@@ -97,8 +97,24 @@ pub struct ScanStats {
     /// because a scan that cannot read anything must not turn into a log
     /// entry the size of the filesystem.
     pub unreadable: Vec<PathBuf>,
+    /// Mount points not descended into because of their filesystem type, or
+    /// because they duplicate a subtree reached through another mount. These
+    /// are the uninteresting skips — virtual filesystems and snap images —
+    /// and on a scan of `/` there are dozens.
     pub skipped_mounts: Vec<PathBuf>,
+    /// Directories not descended into because they are on another device.
+    ///
+    /// Tracked separately because these are the *interesting* ones: a data
+    /// drive mounted below the root looks exactly like this, and its bytes
+    /// are silently absent from the total. Previously this was recorded
+    /// nowhere, which made "no mount was skipped" a thing duTime could say
+    /// while a whole filesystem sat unscanned under the root.
+    pub other_filesystems: Vec<PathBuf>,
 }
+
+/// Enough crossings to name the drive; not so many that a nest of mounts
+/// fills the log.
+const MAX_OTHER_FS: usize = 16;
 
 /// The path an ignore walk error refers to, if it names one.
 ///
@@ -153,11 +169,26 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
         .collect();
 
     let matcher = build_matcher(&root, &opts.exclude)?;
-    let (raw, n_errors, unreadable) = walk(&root, root_dev, opts, &skip, &matcher, &prefixes)?;
-    let mut out = assemble(&root, raw, opts, skip);
-    out.stats.n_errors = n_errors;
-    out.stats.unreadable = unreadable;
+    let w = walk(&root, root_dev, opts, &skip, &matcher, &prefixes)?;
+    let mut out = assemble(&root, w.raw, opts, skip);
+    out.stats.n_errors = w.n_errors;
+    out.stats.unreadable = w.unreadable;
+    out.stats.other_filesystems = w.other_filesystems;
     Ok(out)
+}
+
+/// What one walk produced: the entries, and everything it could not reach.
+///
+/// A struct rather than a tuple because three of the four are "things that
+/// went unseen", and at a call site `(raw, n, a, b)` gives no clue which
+/// `Vec<PathBuf>` is the unreadable paths and which is the crossed mounts.
+struct WalkOutput {
+    raw: Vec<RawEntry>,
+    n_errors: i64,
+    /// Paths that could not be read; their contents are missing from `raw`.
+    unreadable: Vec<PathBuf>,
+    /// Mount points on another device, not descended into.
+    other_filesystems: Vec<PathBuf>,
 }
 
 /// Build a gitignore matcher where a bare pattern means *exclude*.
@@ -181,7 +212,7 @@ fn walk(
     skip: &std::collections::HashSet<PathBuf>,
     matcher: &Gitignore,
     prefixes: &[PathBuf],
-) -> anyhow::Result<(Vec<RawEntry>, i64, Vec<PathBuf>)> {
+) -> anyhow::Result<WalkOutput> {
     let (tx, rx) = mpsc::channel::<RawEntry>();
     let collector = std::thread::spawn(move || rx.into_iter().collect::<Vec<_>>());
 
@@ -199,6 +230,7 @@ fn walk(
 
     let n_errors = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
     let unreadable = std::sync::Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+    let other_fs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
     {
         let root = root.to_path_buf();
         wb.build_parallel().run(|| {
@@ -209,6 +241,7 @@ fn walk(
             let prefixes = prefixes.to_vec();
             let n_errors = n_errors.clone();
             let unreadable = unreadable.clone();
+            let other_fs = other_fs.clone();
             Box::new(move |res| {
                 use ignore::WalkState;
                 let entry = match res {
@@ -255,6 +288,14 @@ fn walk(
                 // mountpoint directory itself is still yielded; drop it so its
                 // inode isn't attributed to this filesystem.
                 if opts.one_filesystem && meta.dev() != root_dev && path != root {
+                    // Record it. Declining to cross a filesystem boundary is
+                    // correct, but it leaves that filesystem's bytes out of
+                    // the total, and nobody can reconcile a number against
+                    // `du` without being told.
+                    let mut v = other_fs.lock().unwrap();
+                    if v.len() < MAX_OTHER_FS && !v.iter().any(|p| path.starts_with(p)) {
+                        v.push(path.to_path_buf());
+                    }
                     return WalkState::Skip;
                 }
 
@@ -289,10 +330,17 @@ fn walk(
     }
     drop(tx);
     let raw = collector.join().map_err(|_| anyhow::anyhow!("collector thread panicked"))?;
-    let unreadable = std::sync::Arc::try_unwrap(unreadable)
-        .map(|m| m.into_inner().unwrap())
-        .unwrap_or_default();
-    Ok((raw, n_errors.load(std::sync::atomic::Ordering::Relaxed), unreadable))
+    let take = |a: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>| {
+        std::sync::Arc::try_unwrap(a).map(|m| m.into_inner().unwrap()).unwrap_or_default()
+    };
+    let mut other_filesystems = take(other_fs);
+    other_filesystems.sort();
+    Ok(WalkOutput {
+        raw,
+        n_errors: n_errors.load(std::sync::atomic::Ordering::Relaxed),
+        unreadable: take(unreadable),
+        other_filesystems,
+    })
 }
 
 /// Turn raw walk output into a tree of exclusive sizes.
@@ -417,4 +465,38 @@ pub fn entities(tree: &Tree) -> Vec<Entity> {
             flags: flags::BORN,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod crossing_tests {
+    use super::*;
+
+    /// An ordinary single-filesystem tree must report no crossings.
+    ///
+    /// The cross-device branch is the one that drives a "your data is behind
+    /// a mount" message, so it has to stay quiet when there is no mount. The
+    /// positive case cannot be built without privilege and was verified
+    /// instead against a live scan of `/`, which correctly reported exactly
+    /// one crossing (`/boot/efi`, vfat, its own device) out of 90 mounts.
+    #[test]
+    fn a_single_filesystem_tree_reports_no_crossings() {
+        let dir = tempfile::Builder::new().prefix("dutime-xfs-").tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("a/b/c")).unwrap();
+        std::fs::write(root.join("a/b/c/f.bin"), vec![b'x'; 2 << 20]).unwrap();
+
+        let mut o = ScanOptions::new(&root);
+        o.threads = 2;
+        let r = scan(&o).unwrap();
+
+        assert!(
+            r.stats.other_filesystems.is_empty(),
+            "reported a filesystem crossing where there is none: {:?}",
+            r.stats.other_filesystems
+        );
+        assert_eq!(r.stats.n_errors, 0);
+        // And it did actually walk the tree, so the assertion above is not
+        // passing merely because nothing happened.
+        assert!(r.tree.len() >= 4, "only found {} entities", r.tree.len());
+    }
 }

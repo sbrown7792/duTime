@@ -370,8 +370,18 @@ fn cmd_scan(
     if r.stats.n_errors > 0 {
         println!("{:<18} {} (unreadable paths were skipped)", "errors", r.stats.n_errors);
     }
-    for m in &r.stats.skipped_mounts {
-        println!("{:<18} {}", "skipped mount", m.display());
+    // Separate filesystems first and unabridged: on a scan of / these are a
+    // handful of real volumes, while the denied-fstype skips are 89 snap
+    // images nobody wants listed.
+    for m in &r.stats.other_filesystems {
+        println!("{:<18} {} (its bytes are NOT in this total)", "other filesystem", m.display());
+    }
+    if !r.stats.skipped_mounts.is_empty() {
+        println!(
+            "{:<18} {} virtual or duplicate mount(s)",
+            "skipped",
+            r.stats.skipped_mounts.len()
+        );
     }
     println!("{:<18} {:.3}s ({} threads)", "walk", walk_ms as f64 / 1000.0, opts.threads);
 
