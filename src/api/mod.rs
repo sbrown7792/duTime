@@ -15,6 +15,7 @@
 pub mod state;
 
 use crate::model::{Metric, PathId, RootId, ScanId};
+use crate::auth::Viewer;
 use crate::store::USABLE_SCAN;
 use crate::store::query::{self, Extreme};
 use crate::store::snapshot::Snapshot;
@@ -43,7 +44,27 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/series", get(series))
         .route("/api/v1/listing", get(listing))
         .route("/api/v1/gainers", get(gainers))
+        .route("/api/v1/auth", get(auth_status))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::middleware,
+        ))
         .with_state(state)
+}
+
+/// Whether a token is in play, and whether this caller has presented one.
+///
+/// Unauthenticated on purpose, and it reveals only what the UI needs to
+/// decide what to draw: is there a sign-in to offer, and are we signed in.
+/// Not the number of protected roots, and certainly not their paths.
+async fn auth_status(State(s): State<Arc<AppState>>, viewer: Viewer) -> ApiResult {
+    blocking(move || {
+        Ok(json!({
+            "required": s.has_protected_roots() && !s.auth.is_open(),
+            "authenticated": viewer.authed(),
+        }))
+    })
+    .await
 }
 
 // ── error plumbing ───────────────────────────────────────────────────────
@@ -121,17 +142,39 @@ fn metric_of(s: &Option<String>) -> Metric {
 
 impl AppState {
     /// Resolve `?root=` to a root id, defaulting to the only/first one.
-    fn pick_root(&self, want: Option<RootId>) -> anyhow::Result<RootId> {
-        let store = self.read();
-        let roots = store.roots()?;
+    /// Resolve the root this request is about, and refuse it if the caller
+    /// may not see it.
+    ///
+    /// An explicit root that is protected is rejected. A request that names
+    /// no root gets the first one the caller *can* see, not simply the first
+    /// one — otherwise an anonymous visitor whose default happens to be
+    /// protected meets an error instead of the data they are allowed.
+    fn pick_root(&self, want: Option<RootId>, viewer: Viewer) -> anyhow::Result<RootId> {
+        let visible = self.visible_roots(viewer)?;
         match want {
-            Some(r) if roots.iter().any(|(id, _)| *id == r) => Ok(r),
+            Some(r) if visible.iter().any(|(id, _)| *id == r) => Ok(r),
+            // Deliberately the same message whether the root is protected or
+            // absent. Having established that the caller may not see it,
+            // confirming it exists would be an odd thing to do next.
             Some(r) => anyhow::bail!("no such root: {r}"),
-            None => roots
-                .first()
-                .map(|(id, _)| *id)
-                .ok_or_else(|| anyhow::anyhow!("no roots tracked yet — run a scan first")),
+            None => visible.first().map(|(id, _)| *id).ok_or_else(|| {
+                if viewer.authed() {
+                    anyhow::anyhow!("no roots tracked yet — run a scan first")
+                } else {
+                    anyhow::anyhow!("every tracked root is protected; sign in to view them")
+                }
+            }),
         }
+    }
+
+    /// The roots this caller is allowed to know about.
+    fn visible_roots(&self, viewer: Viewer) -> anyhow::Result<Vec<(RootId, std::path::PathBuf)>> {
+        let store = self.read();
+        let mut roots = store.roots()?;
+        if !viewer.authed() {
+            roots.retain(|(id, _)| !self.is_protected(*id));
+        }
+        Ok(roots)
     }
 
     /// Resolve a time expression to a concrete scan.
@@ -169,11 +212,19 @@ async fn health(State(s): State<Arc<AppState>>) -> ApiResult {
     .await
 }
 
-async fn roots(State(s): State<Arc<AppState>>) -> ApiResult {
+/// The roots this caller may see — filtered, not rejected.
+///
+/// An anonymous caller is not told that a protected root exists. Listing it
+/// and refusing to open it would leak the path, and a path like
+/// `/mnt/nextcloud/data/steven` is itself information. It also keeps the UI
+/// honest: the root picker shows exactly what it can open, so nothing in it
+/// is a dead end.
+async fn roots(State(s): State<Arc<AppState>>, viewer: Viewer) -> ApiResult {
     blocking(move || {
+        let visible = s.visible_roots(viewer)?;
         let store = s.read();
         let mut out = Vec::new();
-        for (id, path) in store.roots()? {
+        for (id, path) in visible {
             let last = store.last_scan(id)?;
             let first = store.first_scan(id)?;
             out.push(json!({
@@ -196,9 +247,13 @@ struct ScansQ {
     limit: Option<i64>,
 }
 
-async fn scans(State(s): State<Arc<AppState>>, Query(q): Query<ScansQ>) -> ApiResult {
+async fn scans(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<ScansQ>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let store = s.read();
         let mut st = store.conn.prepare(&format!(
             "SELECT scan_id, started_at, duration_ms, n_events, incl_bytes, incl_blocks,
@@ -228,9 +283,13 @@ async fn scans(State(s): State<Arc<AppState>>, Query(q): Query<ScansQ>) -> ApiRe
     .await
 }
 
-async fn resolve(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> ApiResult {
+async fn resolve(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<Common>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let (scan_id, at) = s.pick_scan(root, &q.at)?;
         Ok(json!({ "scan_id": scan_id, "at": at }))
     })
@@ -238,9 +297,13 @@ async fn resolve(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> Api
 }
 
 /// Everything the landing page needs, in one round trip.
-async fn overview(State(s): State<Arc<AppState>>, Query(q): Query<Common>) -> ApiResult {
+async fn overview(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<Common>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let metric = metric_of(&q.metric);
         let (scan_id, at) = s.pick_scan(root, &q.at)?;
 
@@ -399,9 +462,13 @@ struct TreeQ {
 }
 
 /// The treemap feed: a bounded slice of the tree as it stood at one instant.
-async fn tree(State(s): State<Arc<AppState>>, Query(q): Query<TreeQ>) -> ApiResult {
+async fn tree(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<TreeQ>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let metric = metric_of(&q.metric);
         let (scan_id, at) = s.pick_scan(root, &q.at)?;
         let snap = s.snapshot(root, scan_id)?;
@@ -540,9 +607,13 @@ struct DiffQ {
 }
 
 /// The diff treemap feed: rectangle area is size at `to`, colour is the change.
-async fn diff(State(s): State<Arc<AppState>>, Query(q): Query<DiffQ>) -> ApiResult {
+async fn diff(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<DiffQ>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let metric = metric_of(&q.metric);
         let (s1, at1) = s.pick_scan(root, &Some(q.from.clone()))?;
         let (s2, at2) = s.pick_scan(root, &q.to)?;
@@ -690,9 +761,13 @@ struct SeriesQ {
 /// one ancestor walk per event. Cost tracks churn, not tree size, so a window
 /// over a 127k-entity tree with 50 changes costs ~50 x depth operations rather
 /// than replaying 127k entities per sample.
-async fn series(State(s): State<Arc<AppState>>, Query(q): Query<SeriesQ>) -> ApiResult {
+async fn series(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<SeriesQ>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let metric = metric_of(&q.metric);
         let (s2, at2) = s.pick_scan(root, &q.to)?;
         let (s1, at1) = s.pick_scan(root, &Some(q.from.clone().unwrap_or_else(|| "-7d".into())))
@@ -899,9 +974,13 @@ struct GainerOut {
     delta_blocks: i64,
 }
 
-async fn gainers(State(s): State<Arc<AppState>>, Query(q): Query<GainersQ>) -> ApiResult {
+async fn gainers(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<GainersQ>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let (s2, at2) = s.pick_scan(root, &q.to)?;
         let inclusive = q.mode.as_deref() == Some("inclusive");
         let which = if q.losers.unwrap_or(false) { Extreme::Losers } else { Extreme::Gainers };
@@ -1008,9 +1087,13 @@ struct ListingQ {
 /// Sparklines are computed the same way the stacked area is: seed each child
 /// with its size at the start of the window, then attribute every event in the
 /// window to whichever child contains it. Cost tracks churn, not tree size.
-async fn listing(State(s): State<Arc<AppState>>, Query(q): Query<ListingQ>) -> ApiResult {
+async fn listing(
+    State(s): State<Arc<AppState>>,
+    viewer: Viewer,
+    Query(q): Query<ListingQ>,
+) -> ApiResult {
     blocking(move || {
-        let root = s.pick_root(q.root)?;
+        let root = s.pick_root(q.root, viewer)?;
         let metric = metric_of(&q.metric);
         let (s2, at2) = s.pick_scan(root, &q.at)?;
 

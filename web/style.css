@@ -310,3 +310,80 @@ tr:last-child td { border-bottom: none; }
 @media (max-width: 820px) {
   .listing td.ct, .listing th.ct { display: none; }
 }
+
+/* ── sign-in ─────────────────────────────────────────────────────────── */
+
+.icon.authed { color: var(--s1); border-color: color-mix(in srgb, var(--s1) 45%, var(--border)); }
+
+#authDialog {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  padding: 0;
+  max-width: 420px;
+  width: calc(100% - 32px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+}
+#authDialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+#authDialog form { padding: 20px 22px 18px; }
+#authDialog h2 { margin: 0 0 8px; font-size: 17px; }
+#authDialog .hint { margin: 0 0 14px; font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; }
+#authDialog code {
+  font-size: 11.5px;
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  word-break: break-all;
+}
+#authDialog label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+#authDialog input {
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-primary);
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  margin-bottom: 14px;
+}
+#authDialog input:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+/* Status by text, not by colour alone: --critical on this surface is a
+   contrast risk, and a red border says nothing to a greyscale reader. */
+#authDialog .err {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--critical) 10%, var(--surface-1));
+  border: 1px solid color-mix(in srgb, var(--critical) 40%, var(--border));
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+#authDialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+#authDialog button {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 15px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+}
+#authDialog button.primary {
+  background: var(--s1);
+  border-color: var(--s1);
+  color: #fff;
+  font-weight: 550;
+}
+#authDialog button:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }

@@ -241,6 +241,56 @@ config that parses can still track a directory you did not mean. It warns
 about a root nested inside another (legal, but its bytes are then counted
 under both) and exits non-zero if a root does not exist.
 
+### Protecting sensitive roots
+
+duTime shows filenames, and on a volume like a Nextcloud data directory the
+*filenames* are the sensitive part regardless of who owns the bytes. So
+protection is per root, not per server:
+
+```toml
+[auth]
+token_file = "/etc/dutime/token"
+
+[[root]]
+path = "/"                     # anyone on the LAN can see this
+
+[[root]]
+path = "/mnt/nextcloud"
+protected = true               # needs the token
+```
+
+```console
+$ sudo dutime token --write /etc/dutime/token
+```
+
+Then open the UI and click the lock in the header. The token is verified
+before it is stored, so a typo is reported there and then rather than as a
+broken dashboard later, and it is remembered in that browser across reloads.
+
+An anonymous visitor sees the unprotected roots normally and **is not told
+the protected ones exist** — they are absent from the root picker and from
+`/api/v1/roots`, because a path like `/mnt/nextcloud/data/steven` is itself
+information. Asking for one by id returns 401 regardless of how the request
+is otherwise formed.
+
+Two mistakes are caught rather than tolerated. A root marked `protected` with
+no token configured **refuses to start**, because a config that claims to
+protect something while protecting nothing is worse than either. And serving
+a non-loopback address with nothing protected logs a warning.
+
+The token rides in an `Authorization` header, not a cookie: a cookie is
+attached by the browser to any request to this origin, including one a page
+elsewhere triggered, which is what CSRF is. Nothing is hashed or salted
+because nothing needs to be — it is one 256-bit random string from the kernel
+CSPRNG, compared in constant time. There are deliberately no accounts: user
+tables, password hashing, sessions and a reset flow are a great deal of
+security-sensitive surface for a single-operator tool.
+
+**What this is not.** It is not a defence against someone who can read
+`/var/lib/dutime/dutime.db`, and the traffic is plain HTTP, so anyone able to
+watch the network sees the token. For untrusted networks, bind loopback and
+use an SSH tunnel.
+
 ### Reading directories duTime does not own
 
 **Do not run it as root.** The system unit already grants

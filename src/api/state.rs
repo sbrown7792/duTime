@@ -36,6 +36,11 @@ pub struct AppState {
     pub store: Mutex<Store>,
     readers: ReadPool,
     cache: Mutex<Cache>,
+    pub auth: crate::auth::Auth,
+    /// Roots that need the token. Held here rather than in the database
+    /// because it is an access policy for the network API, not a property of
+    /// the recorded data — the local CLI can already read the filesystem.
+    protected: std::collections::HashSet<RootId>,
 }
 
 /// A tiny checkout pool. Not worth a dependency: this is the whole thing.
@@ -95,6 +100,8 @@ impl AppState {
             store: Mutex::new(store),
             readers: ReadPool { idle: Mutex::new(Vec::new()), available: Condvar::new() },
             cache: Mutex::new(Cache::default()),
+            auth: crate::auth::Auth::Open,
+            protected: std::collections::HashSet::new(),
         }
     }
 
@@ -112,6 +119,8 @@ impl AppState {
             store: Mutex::new(writer),
             readers: ReadPool { idle: Mutex::new(idle), available: Condvar::new() },
             cache: Mutex::new(Cache::default()),
+            auth: crate::auth::Auth::Open,
+            protected: std::collections::HashSet::new(),
         })
     }
 
@@ -165,5 +174,28 @@ impl std::ops::Deref for ReadGuard<'_> {
             ReadGuard::Pooled(r) => r,
             ReadGuard::Writer(w) => w,
         }
+    }
+}
+
+impl AppState {
+    /// Declare which roots need the token, and how to check it.
+    ///
+    /// Applied after the roots exist in the database, since the policy is
+    /// keyed by `root_id` and those are assigned on first sight of a path.
+    pub fn set_access(
+        &mut self,
+        auth: crate::auth::Auth,
+        protected: std::collections::HashSet<RootId>,
+    ) {
+        self.auth = auth;
+        self.protected = protected;
+    }
+
+    pub fn is_protected(&self, root: RootId) -> bool {
+        self.protected.contains(&root)
+    }
+
+    pub fn has_protected_roots(&self) -> bool {
+        !self.protected.is_empty()
     }
 }

@@ -164,6 +164,18 @@ pub enum Cmd {
         listen: Option<std::net::SocketAddr>,
     },
 
+    /// Generate a bearer token for the web UI.
+    Token {
+        /// Write it to this file (mode 0600) instead of printing it.
+        #[arg(long, value_name = "FILE")]
+        write: Option<PathBuf>,
+        /// Overwrite an existing file. Without this, an existing token is
+        /// left alone — rotating it silently would lock out every browser
+        /// and script already using it.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Check the database for internal inconsistency.
     Doctor {
         /// Config file, so the checks can see the configured listen address.
@@ -310,6 +322,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 .build()?
                 .block_on(crate::daemon::serve(cfg))
         }
+        Cmd::Token { write, force } => cmd_token(write.as_deref(), force),
         Cmd::Doctor { config, no_network } => {
             // A config that names a database and a doctor that checks a
             // different one is worse than no check: it reports health for a
@@ -1049,12 +1062,42 @@ fn ufw_state() -> Option<String> {
 /// get filled in are not visible in the file.
 fn cmd_config_check(path: &Path) -> Result<()> {
     let cfg = crate::config::Config::load(Some(path))?;
+    let mut problems = 0usize;
     println!("{:<28} {}", "config", path.display());
     println!("{:<28} ok", "parse");
     println!("{:<28} {}", "listen", cfg.listen);
     println!("{:<28} {}", "database", cfg.db.display());
     println!("{:<28} {}", "walker threads", cfg.threads);
     println!("{:<28} {}", "access log", if cfg.access_log { "on" } else { "off" });
+
+    let auth = crate::auth::Auth::from_config(&cfg.auth)?;
+    let n_protected = cfg.roots.iter().filter(|r| r.protected).count();
+    println!(
+        "{:<28} {}",
+        "auth token",
+        match (&auth, cfg.auth.token_file.as_ref()) {
+            (crate::auth::Auth::Open, _) => "none configured".to_string(),
+            (_, Some(f)) => format!("loaded from {}", f.display()),
+            _ => "configured inline".to_string(),
+        }
+    );
+    println!("{:<28} {n_protected} of {}", "protected roots", cfg.roots.len());
+    // The same two mistakes the daemon checks at startup, reported before a
+    // restart rather than by one.
+    if n_protected > 0 && auth.is_open() {
+        problems += 1;
+        println!(
+            "\nPROBLEM  {n_protected} root(s) are marked `protected` but no token is \
+             configured,\n\x20        so nothing is actually protected and the service will \
+             refuse to start.\n\x20 fix    sudo dutime token --write /etc/dutime/token, then \
+             set [auth] token_file"
+        );
+    } else if !auth.is_open() && n_protected == 0 {
+        println!(
+            "\nnote     a token is configured but no root is marked `protected`, so it is \
+             never required"
+        );
+    }
 
     if cfg.roots.is_empty() {
         println!("\nno [[root]] blocks: nothing would be tracked");
@@ -1074,6 +1117,11 @@ fn cmd_config_check(path: &Path) -> Result<()> {
         ));
         println!("    {:<22} {}", "track files over", ByteSize(r.track_file_min_bytes as u64));
         println!("    {:<22} {}", "one filesystem", r.one_filesystem);
+        println!(
+            "    {:<22} {}",
+            "protected",
+            if r.protected { "yes — token required" } else { "no — visible to anyone" }
+        );
         println!("    {:<22} {}", "exclude", fmt_list(&r.exclude));
         // Show only the absolute excludes that bear on *this* root. The
         // defaults include /tmp and /proc, and printing them verbatim under a
@@ -1116,11 +1164,75 @@ fn cmd_config_check(path: &Path) -> Result<()> {
             missing.len()
         );
     }
+    if problems > 0 {
+        anyhow::bail!("{problems} problem(s) found");
+    }
     Ok(())
 }
 
 fn fmt_list(v: &[String]) -> String {
     if v.is_empty() { "(none)".into() } else { v.join(", ") }
+}
+
+
+
+/// Generate a token, and say what to do with it.
+///
+/// Exists so that nobody has to invent their own. A hand-picked token is
+/// short, memorable and guessable, and the temptation to reuse a password
+/// here is strong — this is 256 bits from the kernel CSPRNG, which removes
+/// the decision.
+fn cmd_token(write: Option<&Path>, force: bool) -> Result<()> {
+    let token = crate::auth::generate()?;
+
+    let Some(path) = write else {
+        println!("{token}");
+        eprintln!();
+        eprintln!("Save it, then point the config at it:");
+        eprintln!("  sudo dutime token --write /etc/dutime/token");
+        eprintln!("  # then, in the config:");
+        eprintln!("  [auth]");
+        eprintln!("  token_file = \"/etc/dutime/token\"");
+        return Ok(());
+    };
+
+    if path.exists() && !force {
+        anyhow::bail!(
+            "{} already exists. Replacing a token signs out every browser and breaks \
+             every script using it, so pass --force if that is what you want.",
+            path.display()
+        );
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+    }
+    // Created 0600 from the outset. Writing it world-readable and chmod-ing
+    // afterwards leaves a window in which the secret is readable by anyone.
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        writeln!(f, "{token}")?;
+    }
+
+    println!("{:<14} {}", "wrote", path.display());
+    println!("{:<14} 0600", "mode");
+    println!("{:<14} {token}", "token");
+    println!();
+    println!("Add to the config, then restart:");
+    println!("  [auth]");
+    println!("  token_file = \"{}\"", path.display());
+    println!();
+    println!("Mark the roots you want gated with `protected = true`, then sign in at the");
+    println!("web UI with the lock button in the header and paste the token above.");
+    Ok(())
 }
 
 #[cfg(test)]

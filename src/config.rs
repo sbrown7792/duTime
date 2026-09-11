@@ -28,8 +28,22 @@ pub struct Config {
     /// Turn it on to answer the question that matters when the page will not
     /// load: do requests reach us at all?
     pub access_log: bool,
+    #[serde(default)]
+    pub auth: AuthConfig,
     #[serde(rename = "root")]
     pub roots: Vec<RootConfig>,
+}
+
+/// Who may read the API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// A file holding one token. Preferred over `token`: a path in a config
+    /// file is not a secret, whereas the secret itself in a config file gets
+    /// copied into backups, pasted into issues and committed to git.
+    pub token_file: Option<PathBuf>,
+    /// The token inline. Works, but see above.
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +65,13 @@ pub struct RootConfig {
     pub exclude: Vec<String>,
     /// Absolute paths never to descend into.
     pub exclude_paths: Vec<PathBuf>,
+    /// Require the bearer token to see this root over the API.
+    ///
+    /// Per-root rather than global so a shared dashboard stays useful: the
+    /// system disk can be visible to anyone on the LAN while a Nextcloud
+    /// volume, whose *filenames* are the sensitive part, needs the token.
+    /// An unauthenticated caller is not told this root exists.
+    pub protected: bool,
 }
 
 impl Default for RootConfig {
@@ -62,6 +83,7 @@ impl Default for RootConfig {
             track_file_min_bytes: 1 << 20,
             exclude: default_excludes(),
             exclude_paths: default_exclude_paths(),
+            protected: false,
         }
     }
 }
@@ -106,6 +128,7 @@ impl Default for Config {
             checkpoint_every_scans: 288,
             checkpoint_min_bytes: 1 << 20,
             access_log: false,
+            auth: AuthConfig::default(),
             roots: Vec::new(),
         }
     }
@@ -201,6 +224,17 @@ listen = "127.0.0.1:8471"
 # "requests arrive and something is slow".
 # access_log = false
 
+# A bearer token, required to view any root marked `protected = true` below.
+# Generate one with:  sudo dutime token --write /etc/dutime/token
+# Sign in from the web UI with the lock button in the header.
+#
+# Unprotected roots stay visible without it, so a shared dashboard can show
+# the system disk to anyone on the LAN while a volume whose *filenames* are
+# the sensitive part stays shut. An anonymous visitor is not told that a
+# protected root exists.
+# [auth]
+# token_file = "/etc/dutime/token"
+
 # Walker threads. Half the cores, capped at 4, by default.
 # threads = 4
 
@@ -229,8 +263,11 @@ exclude_paths = ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap"]
 # the web UI gets a picker to switch between them.
 #
 # [[root]]
-# path = "/mnt/media"
+# path = "/mnt/nextcloud"
 # interval_s = 3600
+# Needs the token above. Sizes, growth and filenames are all hidden from
+# anyone who has not signed in -- including the fact that this root exists.
+# protected = true
 # A big, slow, rarely-changing drive wants a coarser threshold: tracking every
 # 1 MiB file on a media volume is a lot of rows about things that never move.
 # track_file_min_bytes = 104857600

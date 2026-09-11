@@ -32,6 +32,7 @@
         <button data-metric="allocated" title="Sum of st_blocks×512 — what the filesystem actually spent">Allocated</button>
       </div>
     </div>
+    <button id="signin" class="icon" hidden title="Sign in to view protected roots">🔒</button>
     <button id="theme" class="icon" title="Switch light / dark" aria-label="Switch light / dark">◐</button>
   </div>
 </header>
@@ -157,7 +158,33 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 
+<!-- Sign-in. A <dialog> rather than a hand-built overlay: the browser
+     supplies the focus trap, Escape-to-close and inert background, all of
+     which are easy to get subtly wrong by hand. -->
+<dialog id="authDialog">
+  <form id="authForm">
+    <h2>Sign in</h2>
+    <p class="hint">
+      Some roots on this server need a token. Paste it below and it is
+      remembered in this browser.
+    </p>
+    <label for="authToken">Token</label>
+    <input id="authToken" type="password" autocomplete="current-password"
+           spellcheck="false" placeholder="43-character token">
+    <p class="hint">
+      Don't have one? On the server:<br>
+      <code>sudo dutime token --write /etc/dutime/token</code>
+    </p>
+    <p class="err" id="authErr" hidden></p>
+    <div class="row">
+      <button type="button" id="authCancel" class="ghost">Cancel</button>
+      <button type="submit" id="authOk" class="primary">Sign in</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/vendor/echarts.min.js"></script>
 <script src="/app.js"></script>
+
 </body>
 </html>

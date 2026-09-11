@@ -4,6 +4,7 @@
 //! the question you actually have when a disk fills up.
 
 pub mod api;
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod daemon;

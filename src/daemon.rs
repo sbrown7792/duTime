@@ -166,14 +166,44 @@ impl Scheduler {
 pub async fn serve(cfg: Config) -> Result<()> {
     // A writer plus a pool of readers, so the web UI never queues behind the
     // scanner's commit.
-    let state = Arc::new(AppState::open(&cfg.db)?);
+    let mut state = AppState::open(&cfg.db)?;
+
+    // Roots get their ids on first sight, and the access policy is keyed by
+    // id, so registration has to happen before the policy is installed.
+    let mut protected = std::collections::HashSet::new();
     {
         let store = state.store.lock().unwrap();
         for r in &cfg.roots {
             let canon = r.path.canonicalize().unwrap_or_else(|_| r.path.clone());
-            store.ensure_root(&canon)?;
+            let id = store.ensure_root(&canon)?;
+            if r.protected {
+                protected.insert(id);
+            }
         }
     }
+
+    let auth = crate::auth::Auth::from_config(&cfg.auth)?;
+    // A root marked protected with no token configured is not protected, and
+    // the config says otherwise — which is worse than either, because
+    // somebody has decided the problem is handled. Refuse to start.
+    if !protected.is_empty() && auth.is_open() {
+        anyhow::bail!(
+            "{} root(s) are marked `protected` but no token is configured, so nothing \
+             would actually be protected.\n\nFix with:\n  \
+             sudo dutime token --write /etc/dutime/token\n\
+             then add to the config:\n  [auth]\n  token_file = \"/etc/dutime/token\"",
+            protected.len()
+        );
+    }
+    if !auth.is_open() && protected.is_empty() {
+        tracing::warn!(
+            "a token is configured but no root is marked `protected`, so it is never \
+             required. Add `protected = true` to the [[root]] blocks you want to gate."
+        );
+    }
+    let n_protected = protected.len();
+    state.set_access(auth, protected);
+    let state = Arc::new(state);
 
     let sched = Arc::new(Scheduler::new(state.clone(), cfg.clone()));
     sched.spawn_all();
@@ -208,9 +238,19 @@ pub async fn serve(cfg: Config) -> Result<()> {
     spawn_reachability_probe(bound);
     for r in &cfg.roots {
         tracing::info!(
-            "  tracking {} every {}",
+            "  tracking {} every {}{}",
             r.path.display(),
-            humantime::format_duration(Duration::from_secs(r.interval_s))
+            humantime::format_duration(Duration::from_secs(r.interval_s)),
+            if r.protected { "  [protected: token required]" } else { "" }
+        );
+    }
+    // The combination that quietly publishes a filesystem inventory to the
+    // network: bound to every interface with nothing gated.
+    if !bound.ip().is_loopback() && n_protected == 0 {
+        tracing::warn!(
+            "serving on {bound} with no protected roots — anyone who can reach this port \
+             can read every filename and size duTime has recorded. Mark sensitive roots \
+             with `protected = true` and set [auth] token_file, or bind 127.0.0.1."
         );
     }
 

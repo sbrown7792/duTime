@@ -89,6 +89,24 @@ function toast(msg) {
   toast._t = setTimeout(() => t.classList.remove('on'), 5000);
 }
 
+// ── sign-in ────────────────────────────────────────────────────────────
+
+/* The token lives in localStorage and rides on an Authorization header.
+ *
+ * Not a cookie: a cookie is attached by the browser to any request to this
+ * origin, including one triggered by a form on someone else's page, which is
+ * what CSRF is. A header has to be set deliberately by our own code, so that
+ * whole class of problem does not arise and there is no need for tokens,
+ * double-submit or SameSite reasoning.
+ *
+ * localStorage rather than sessionStorage so a reload does not sign you out,
+ * which for a dashboard left open on a second monitor is the difference
+ * between useful and irritating.
+ */
+const TOKEN_KEY = 'dutime.token';
+const getToken = () => localStorage.getItem(TOKEN_KEY) || '';
+const setToken = (t) => t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
+
 async function api(path, params = {}) {
   const q = new URLSearchParams();
   if (state.root != null) q.set('root', state.root);
@@ -96,10 +114,87 @@ async function api(path, params = {}) {
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) q.set(k, v);
   }
-  const r = await fetch(`/api/v1/${path}?${q}`);
+  const headers = {};
+  const t = getToken();
+  if (t) headers.Authorization = `Bearer ${t}`;
+  const r = await fetch(`/api/v1/${path}?${q}`, { headers });
   const j = await r.json().catch(() => ({ error: `${r.status} ${r.statusText}` }));
+  if (r.status === 401) {
+    const e = new Error(j.error || 'sign in to view this');
+    e.needsAuth = true;
+    throw e;
+  }
   if (!r.ok) throw new Error(j.error || `request failed: ${r.status}`);
   return j;
+}
+
+/** Reflect sign-in state in the header, and offer the way in. */
+async function refreshAuth() {
+  let a;
+  try {
+    a = await api('auth');
+  } catch {
+    return; // an older server, or one that is simply down
+  }
+  const btn = $('#signin');
+  // Hidden entirely when nothing is gated: an affordance that cannot
+  // accomplish anything is just a question the user has to answer.
+  btn.hidden = !a.required && !a.authenticated;
+  btn.textContent = a.authenticated ? '\u{1F513}' : '\u{1F512}';
+  btn.title = a.authenticated ? 'Signed in — click to sign out' : 'Sign in to view protected roots';
+  btn.classList.toggle('authed', a.authenticated);
+  state.authed = a.authenticated;
+}
+
+function openSignIn(message) {
+  const d = $('#authDialog');
+  $('#authErr').hidden = !message;
+  $('#authErr').textContent = message || '';
+  $('#authToken').value = '';
+  d.showModal();
+  $('#authToken').focus();
+}
+
+async function trySignIn(token) {
+  // Verified against the server before being stored, so a typo is reported
+  // now rather than as a broken dashboard later.
+  const r = await fetch('/api/v1/auth', { headers: { Authorization: `Bearer ${token}` } });
+  const j = await r.json().catch(() => ({}));
+  if (!j.authenticated) return false;
+  setToken(token);
+  return true;
+}
+
+function wireAuth() {
+  $('#signin').addEventListener('click', async () => {
+    if (state.authed) {
+      setToken('');
+      await refreshAuth();
+      await boot();
+      toast('Signed out.');
+    } else {
+      openSignIn();
+    }
+  });
+
+  $('#authCancel').addEventListener('click', () => $('#authDialog').close());
+
+  $('#authForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const t = $('#authToken').value.trim();
+    if (!t) return;
+    const ok = await trySignIn(t);
+    if (!ok) {
+      $('#authErr').hidden = false;
+      $('#authErr').textContent = 'That token was not accepted.';
+      $('#authToken').select();
+      return;
+    }
+    $('#authDialog').close();
+    await refreshAuth();
+    await boot();
+    toast('Signed in.');
+  });
 }
 
 /** Choose an axis max and tick interval on binary boundaries.
@@ -751,7 +846,9 @@ async function refresh() {
     else if (state.view === 'changes') await loadGainers('#changesTable', 100);
     else if (state.view === 'compare') await loadDiff();
   } catch (e) {
-    toast(e.message);
+    // A 401 has an answer, so offer it rather than reporting a dead end.
+    if (e.needsAuth) openSignIn(e.message);
+    else toast(e.message);
   }
 }
 
@@ -876,18 +973,38 @@ async function init() {
 
   addEventListener('resize', () => Object.values(charts).forEach((c) => c.resize()));
 
+  wireAuth();
+  await refreshAuth();
+  await boot();
+}
+
+/* Load the root list and settle on one.
+ *
+ * Separate from init because signing in or out changes which roots exist as
+ * far as this browser is concerned, and everything downstream — the picker,
+ * the scan list, the time slider — has to be rebuilt from the new list
+ * rather than left pointing at a root that is no longer visible.
+ */
+async function boot() {
   try {
     const r = await api('roots');
     if (!r.roots.length) {
-      document.querySelector('main').innerHTML =
-        '<div class="card"><div class="empty">No roots tracked yet.<br><br>'
-        + 'Run <code>dutime scan /some/path</code> and reload.</div></div>';
+      document.querySelector('main').innerHTML = state.authed === false && !$('#signin').hidden
+        ? '<div class="card"><div class="empty">Every tracked root is protected.<br><br>'
+          + 'Sign in with the lock button above to view them.</div></div>'
+        : '<div class="card"><div class="empty">No roots tracked yet.<br><br>'
+          + 'Run <code>dutime scan /some/path</code> and reload.</div></div>';
       return;
     }
     $('#root').innerHTML = r.roots.map((x) =>
       `<option value="${x.root_id}">${escapeHtml(x.path.name)}</option>`).join('');
-    state.root = r.roots[0].root_id;
-    state.rootPath = r.roots[0].path.name;
+    // Stay where we are if that root is still visible; signing out of a
+    // protected root has to land somewhere rather than erroring.
+    const keep = r.roots.find((x) => x.root_id === state.root) || r.roots[0];
+    if (keep.root_id !== state.root) state.path = null;
+    state.root = keep.root_id;
+    state.rootPath = keep.path.name;
+    $('#root').value = state.root;
     await loadScans();
     state.scanIdx = Math.max(0, state.scans.length - 1);
     $('#timeSlider').value = state.scanIdx;
