@@ -17,11 +17,15 @@ Early development. The scanner and its correctness gate are in place.
 - [x] Mount-aware one-filesystem restriction (incl. same-device bind mounts)
 - [x] Deterministic hardlink de-duplication
 - [x] Complete SQLite schema
-- [ ] Change-only event store
-- [ ] Query layer: as-of-T sizes, biggest gainers
-- [ ] CLI
+- [x] Change-only event store
+- [x] Query layer: as-of-T sizes, biggest gainers, collapse-ancestors
+- [x] CLI: `scan`, `du --at`, `top --since`, `scans`, `doctor`
 - [ ] Daemon + REST API
 - [ ] Web UI: treemap, time slider, diff treemap
+
+Measured on a live 448 GiB home directory (884k files, 127k tracked entities):
+a full walk takes ~2.1 s, the baseline snapshot is a 20 MB database, and each
+subsequent scan records **2–10 events**.
 
 ## Why not an existing tool?
 
@@ -67,11 +71,45 @@ cargo test
 Verified against a real 11 GB `/usr` tree: apparent and allocated totals both
 match `du` exactly.
 
+## Using it
+
+```console
+$ dutime scan /home/steven
+path               /home/steven
+apparent           451.7 GiB
+directories        103463
+files              884071
+walk               2.080s (4 threads)
+stored             scan 5 — 15 event(s), 5 new, 0 gone
+
+$ dutime top --since 24h
+what grew in the last 24h (exclusive mode)
+
+    +2.9 GiB  /home/steven/dutime-demo/nested/deep/blob.bin
+   +40.0 MiB  /home/steven/dutime-demo/small.bin
+  +731.1 KiB  /home/steven/.config/Nextcloud/logs/20260910_2022_nextcloud.log.0
+
+$ dutime du /home/steven --at 2026-09-01
+448.7 GiB	/home/steven
+
+$ dutime doctor
+sqlite integrity_check       ok
+current_size consistency     ok (/home/steven)
+reconstruction               ok (recorded 485003831571, fast 485003831571, replay 485003831571)
+no problems found
+```
+
+`top` has two modes. **Exclusive** names the directory whose *own* files grew,
+which points straight at the culprit. **Inclusive** rolls growth up the
+ancestor chain, and by default hides any directory whose growth is entirely
+explained by one child — otherwise a single new file reports itself nine times,
+once for every directory above it.
+
 ## Building
 
 ```
 cargo build --release
-./target/release/dutime scan /usr
+cargo test
 ```
 
 ## License

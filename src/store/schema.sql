@@ -114,6 +114,26 @@ CREATE TABLE IF NOT EXISTS size_event (
 -- gainers/diff.
 CREATE INDEX IF NOT EXISTS size_event_by_scan ON size_event(scan_id, path_id);
 
+-- ─────────── materialized current state ───────────
+-- The absolute exclusive values as of the most recent scan, for every live
+-- entity. One row per live path; ~126k rows, a few MB.
+--
+-- This is a materialization of "the latest size_event per path", and it exists
+-- because computing that honestly is the one genuinely expensive query in the
+-- design. `size_event` is clustered by (path_id, scan_id), so "last row per
+-- path" still has to touch every historical row -- after a year that is
+-- millions of rows scanned to answer a question about 126k paths, on the hot
+-- path of every single scan.
+--
+-- Kept in the same transaction as the events it summarizes, so the two cannot
+-- diverge. `dutime doctor` re-derives it from scratch and compares.
+CREATE TABLE IF NOT EXISTS current_size (
+  path_id    INTEGER PRIMARY KEY,
+  own_bytes  INTEGER NOT NULL,
+  own_blocks INTEGER NOT NULL,
+  own_files  INTEGER NOT NULL
+) WITHOUT ROWID, STRICT;
+
 -- ─────────── materialized inclusive checkpoints (keyframes) ───────────
 -- Bounds "as of T" reconstruction: without these, reconstructing a size means
 -- replaying every event since the beginning of time. Written every
