@@ -132,6 +132,12 @@ button.ghost:hover, button.icon:hover { color: var(--text-primary); }
   padding: 0 22px;
   background: var(--surface-1);
   border-bottom: 1px solid var(--border);
+  /* Four tabs plus 44px of padding is wider than a small phone. Wrapping
+     keeps every tab reachable; letting the row push the page would not. */
+  flex-wrap: wrap;
+}
+@media (max-width: 420px) {
+  .tabs { padding: 0 10px; }
 }
 .tabs button {
   font: inherit; font-size: 13px;
@@ -219,9 +225,31 @@ tr:last-child td { border-bottom: none; }
 .rowctl { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
 .spacer { flex: 1; }
 .chk { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-secondary); }
-.slider { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-secondary); }
-.slider input { width: 220px; padding: 0; }
-.slider output { font-variant-numeric: tabular-nums; min-width: 132px; }
+/* A 220px track plus a 132px min-width label plus the "As of" caption adds up
+   to more than a phone is wide, and the row had no way to give any of it
+   back — so the page grew a horizontal scrollbar at narrow widths. The track
+   now shrinks and the row wraps as a last resort. */
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.slider input { width: 220px; min-width: 90px; flex: 1 1 120px; padding: 0; }
+.slider output {
+  font-variant-numeric: tabular-nums;
+  min-width: 132px;
+  flex-shrink: 1;
+}
+
+@media (max-width: 560px) {
+  /* Below this the timestamp cannot have its 132px and the track too. */
+  .slider output { min-width: 0; }
+}
 
 .crumbs { display: flex; align-items: center; gap: 5px; font-size: 13px; flex-wrap: wrap; }
 .crumbs button {
@@ -309,6 +337,14 @@ tr:last-child td { border-bottom: none; }
 
 @media (max-width: 820px) {
   .listing td.ct, .listing th.ct { display: none; }
+}
+
+/* The pinned columns alone come to 344px, which does not fit a small phone
+   however little the name column is given. The trend is the one to drop:
+   the Change column still says what happened, in numbers, which is the part
+   a 132px picture was only ever summarising. */
+@media (max-width: 560px) {
+  .listing td.trend, .listing th.trend { display: none; }
 }
 
 /* ── sign-in ─────────────────────────────────────────────────────────── */
@@ -449,21 +485,41 @@ body.loading #main {
 /* The card becomes the positioning context for its own bar. */
 .card { position: relative; }
 
+/* The element stays exactly the width of the card and never moves; what
+   travels is the gradient painted inside it.
+   The page-level bar animates `transform` instead, which is fine because it
+   sits in a wrapper with `overflow: hidden`. Doing that here would need the
+   clipping on `.card` itself, and that would also clip chart tooltips, which
+   legitimately extend past their card. Moving the element without clipping —
+   the first version of this — pushed it a full card-width to the right of
+   the card, widening the document and flashing a horizontal scrollbar on
+   every load. */
 .card::after {
   content: "";
   position: absolute;
   inset: 0 0 auto 0;
   height: 2px;
   border-radius: 10px 10px 0 0;
-  background: var(--s1);
-  transform: scaleX(0);
-  transform-origin: 0 50%;
   opacity: 0;
   pointer-events: none;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--s1) 30%,
+    var(--s1) 70%,
+    transparent 100%
+  );
+  background-repeat: no-repeat;
+  background-size: 38% 100%;
+  background-position: -40% 0;
 }
 .card.busy::after {
   opacity: 1;
-  animation: sweep 1.15s ease-in-out infinite;
+  animation: pane-sweep 1.15s ease-in-out infinite;
+}
+@keyframes pane-sweep {
+  from { background-position: -40% 0; }
+  to   { background-position: 140% 0; }
 }
 
 /* Dim the body, not the heading: the title and subtitle say which pane is
@@ -481,6 +537,17 @@ body:not(.loading) .card.busy > *:not(figcaption) { opacity: 0.4; }
 .card.busy > *:not(figcaption) { transition: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .card.busy::after { animation: none; transform: scaleX(1); opacity: 0.75; }
+  .card.busy::after {
+    animation: none;
+    background-image: none;
+    background-color: var(--s1);
+    opacity: 0.75;
+  }
   .card > *:not(figcaption) { transition: none; }
 }
+
+/* A table wider than its card scrolls itself rather than the page. The
+   listing sheds columns instead, which is nicer, but this is the backstop
+   for every table and for the listing too — nothing here should ever be the
+   reason the whole document grows a horizontal scrollbar. */
+#listing, #seriesTable, #gainTable, #changesTable, #diffTable { overflow-x: auto; }
