@@ -51,6 +51,32 @@ const charts = {};
 let busyDepth = 0;
 let busyTimer = null;
 
+/* Per-pane progress.
+ *
+ * The page-level bar is right for a root change, when every pane is about to
+ * be replaced. It is wrong for descending into a directory: the panes finish
+ * at different times — the listing in milliseconds, the treemap after the
+ * layout — and a single bar that clears when the last one lands says nothing
+ * about which is still working.
+ *
+ * So each pane carries its own. The bar sits on the card's own top edge and
+ * the card's body dims, which also answers "did my click register?" for the
+ * one thing you clicked on.
+ */
+async function inPane(sel, fn) {
+  const el = $(sel);
+  // Shorter hold-off than the page-level bar: a pane is a smaller, more
+  // local change, and 120ms is about the point where a click stops feeling
+  // like it did nothing.
+  const timer = el ? setTimeout(() => el.classList.add('busy'), 120) : null;
+  try {
+    return await fn();
+  } finally {
+    clearTimeout(timer);
+    if (el) el.classList.remove('busy');
+  }
+}
+
 /** Blank every pane that is about to be answered for a different root. */
 function clearPanes(msg) {
   const note = `<div class="empty">${escapeHtml(msg)}</div>`;
@@ -355,6 +381,7 @@ function seriesColors() {
 // ── overview ───────────────────────────────────────────────────────────
 
 async function loadOverview() {
+  return inPane('#pane-used', async () => {
   const gen = loadGen;
   const o = await api('overview');
   if (!isCurrent(gen)) return;
@@ -422,6 +449,7 @@ async function loadOverview() {
     : '';
 
   await loadGainers('#gainTable', 8);
+  });
 }
 
 function forecastTile(f) {
@@ -451,6 +479,9 @@ function forecastTile(f) {
 // ── gainers table ──────────────────────────────────────────────────────
 
 async function loadGainers(sel, limit) {
+  // The gainers table appears on two views; mark whichever card holds it.
+  const pane = sel === '#gainTable' ? '#pane-gainers' : '#pane-changes';
+  return inPane(pane, async () => {
   const gen = loadGen;
   const g = await api('gainers', {
     from: state.window, mode: state.mode,
@@ -479,6 +510,7 @@ async function loadGainers(sel, limit) {
     sub.textContent = `Between ${fmtTime(g.from.at)} and ${fmtTime(g.to.at)}.${note}`;
   }
   return g;
+  });
 }
 
 function escapeHtml(s) {
@@ -533,6 +565,7 @@ function depthColors() {
 }
 
 async function loadTreemap() {
+  return inPane('#pane-treemap', async () => {
   const gen = loadGen;
   const s = currentScan();
   const t = await api('tree', {
@@ -615,6 +648,7 @@ async function loadTreemap() {
   });
 
   return t;
+  });
 }
 
 function joinPath(base, parts) {
@@ -642,6 +676,7 @@ function renderCrumbs() {
 }
 
 async function loadSeries() {
+  return inPane('#pane-series', async () => {
   const gen = loadGen;
   let s;
   try {
@@ -709,6 +744,7 @@ async function loadSeries() {
         <td class="num ${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${fmtDelta(d)}</td>
       </tr>`;
     }).join('')}</tbody></table>`;
+  });
 }
 
 // ── directory listing ──────────────────────────────────────────────────
@@ -784,6 +820,7 @@ function sparkSvg(vals, swing = null, w = 132, h = 24) {
 const KIND_ICON = { dir: '\u{1F4C1}', file: '\u{1F4C4}', symlink: '\u{21B3}', other: '\u{2022}' };
 
 async function loadListing() {
+  return inPane('#pane-contents', async () => {
   const gen = loadGen;
   let d;
   try {
@@ -920,6 +957,7 @@ async function loadListing() {
     else { state.listSort = k; state.listDesc = k !== 'name'; }
     loadListing();
   }));
+  });
 }
 
 // ── diff treemap ───────────────────────────────────────────────────────
@@ -941,6 +979,7 @@ function divergingColor(delta, before) {
 }
 
 async function loadDiff() {
+  return inPane('#pane-diff', async () => {
   const gen = loadGen;
   const from = $('#diffFrom').value, to = $('#diffTo').value;
   if (!from || !to) return;
@@ -997,6 +1036,7 @@ async function loadDiff() {
       data: (d.node.children || [d.node]).map(paint),
     }],
   }, true);
+  });
 }
 
 // ── wiring ─────────────────────────────────────────────────────────────

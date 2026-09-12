@@ -443,3 +443,44 @@ body.loading #main {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
+
+/* ── per-pane loading ────────────────────────────────────────────────── */
+
+/* The card becomes the positioning context for its own bar. */
+.card { position: relative; }
+
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  border-radius: 10px 10px 0 0;
+  background: var(--s1);
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+.card.busy::after {
+  opacity: 1;
+  animation: sweep 1.15s ease-in-out infinite;
+}
+
+/* Dim the body, not the heading: the title and subtitle say which pane is
+   working, so they are the last thing that should fade. `figcaption` is the
+   heading block on every card that has one. */
+.card.busy > *:not(figcaption) { pointer-events: none; }
+
+/* Only when the page as a whole is not already dimmed. A root change dims
+   #main and then every pane reports itself, and the two multiply: 0.42 x 0.4
+   left the "Loading…" message at 0.17 opacity, which is a message nobody can
+   read. The pane bars still show through, so which panes are still working
+   is still visible. */
+body:not(.loading) .card.busy > *:not(figcaption) { opacity: 0.4; }
+.card > *:not(figcaption) { transition: opacity 160ms ease-out; }
+.card.busy > *:not(figcaption) { transition: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .card.busy::after { animation: none; transform: scaleX(1); opacity: 0.75; }
+  .card > *:not(figcaption) { transition: none; }
+}

@@ -56,7 +56,7 @@
     <div id="scanWarn"></div>
     <div class="tiles" id="tiles"></div>
 
-    <figure class="card">
+    <figure class="card" id="pane-used">
       <figcaption>
         <h2>Space used over time</h2>
         <p class="sub" id="usedSub">How the tracked tree has grown.</p>
@@ -64,7 +64,7 @@
       <div class="plot" id="usedChart"></div>
     </figure>
 
-    <figure class="card">
+    <figure class="card" id="pane-gainers">
       <figcaption>
         <h2>Biggest gainers</h2>
         <p class="sub" id="gainSub">Which directory's own files grew the most.</p>
@@ -75,7 +75,7 @@
 
   <!-- ───────────────────────── Explorer ───────────────────────── -->
   <section id="view-explorer" class="view">
-    <div class="card">
+    <div class="card" id="pane-treemap">
       <div class="rowctl">
         <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
         <div class="spacer"></div>
@@ -93,14 +93,14 @@
       </p>
     </div>
 
-    <figure class="card">
+    <figure class="card" id="pane-contents">
       <figcaption>
         <h2>Contents</h2>
         <p class="sub" id="listSub">Everything in this directory, with its recent trend.</p>
       </figcaption>
       <div class="rowctl">
         <div class="seg" role="group" aria-label="Trend scale">
-          <span>Trend</span>
+          <span>Trend scale</span>
           <div>
             <button data-spark="relative" class="on"
                     title="Each trend fills its own cell — shows the shape of every row, including small ones">Per row</button>
@@ -112,7 +112,7 @@
       <div id="listing"></div>
     </figure>
 
-    <figure class="card">
+    <figure class="card" id="pane-series">
       <figcaption>
         <h2 id="seriesTitle">Composition over time</h2>
         <p class="sub">The selected directory broken into its largest children.</p>
@@ -127,7 +127,7 @@
 
   <!-- ───────────────────────── Changes ───────────────────────── -->
   <section id="view-changes" class="view">
-    <div class="card">
+    <div class="card" id="pane-changes">
       <div class="rowctl">
         <div class="seg" role="group" aria-label="Attribution mode">
           <button data-mode="exclusive" class="on" title="The directory whose own files changed">Exclusive</button>
@@ -150,7 +150,7 @@
 
   <!-- ───────────────────────── Compare ───────────────────────── -->
   <section id="view-compare" class="view">
-    <div class="card">
+    <div class="card" id="pane-diff">
       <div class="rowctl">
         <label class="ctl"><span>From</span><select id="diffFrom"></select></label>
         <label class="ctl"><span>To</span><select id="diffTo"></select></label>

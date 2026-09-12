@@ -137,6 +137,10 @@ so you can see which of thirty siblings is the one creeping up before deciding
 which to open. Then the same directory decomposed into its largest children as
 a stacked area.
 
+Each pane reports its own progress — they finish at different times, and a
+single page-wide spinner that clears when the last one lands tells you
+nothing about which is still working.
+
 Both scales measure **movement**, and differ only in whose movement sets the
 height — every row is drawn from its own low point, because the Size column
 already answers how big a directory is.
