@@ -579,3 +579,61 @@ fn scopeguard(p: std::path::PathBuf) -> impl Drop {
     }
     G(p)
 }
+
+/// A v1 database must migrate to the wide event index, not silently keep the
+/// narrow one.
+///
+/// `CREATE INDEX IF NOT EXISTS` in the schema cannot do this: the index
+/// already exists under the same name, just without the columns that make it
+/// covering, so the statement is a no-op and every existing install would
+/// keep paying the slow path forever.
+#[test]
+#[cfg(unix)]
+fn a_v1_database_gets_the_covering_event_index() {
+    let dir = tempfile::Builder::new().prefix("dutime-migr-").tempdir().unwrap();
+    let path = dir.path().join("old.db");
+
+    // Build a v1-shaped database: current schema, then put the narrow index
+    // and the old version number back.
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP INDEX IF EXISTS size_event_by_scan;
+                 CREATE INDEX size_event_by_scan ON size_event(scan_id, path_id);
+                 UPDATE meta SET v = 1 WHERE k = 'schema_version';",
+            )
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let sql: String = store
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='size_event_by_scan'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(sql.contains("d_bytes"), "index was not widened: {sql}");
+    assert!(sql.contains("d_blocks"), "index was not widened: {sql}");
+
+    let v: i64 = store
+        .conn
+        .query_row("SELECT v FROM meta WHERE k = 'schema_version'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, dutime::store::SCHEMA_VERSION, "version was not advanced");
+
+    // And the query actually uses it without touching the table.
+    let plan: String = store
+        .conn
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT scan_id, path_id, d_bytes, d_blocks FROM size_event
+             WHERE scan_id > 1 AND scan_id <= 5",
+            [],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(plan.contains("COVERING INDEX"), "not a covering scan: {plan}");
+}

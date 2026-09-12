@@ -27,10 +27,20 @@ fn main() -> anyhow::Result<()> {
     let root_path = std::path::Path::new("/media/nextcloud");
     let root_id = store.ensure_root(root_path)?;
 
-    let mut clock = 1_780_000_000i64;
+    // Anchored to now, an hour apart, so a `-24h` window actually covers the
+    // fixture. With a clock in the past every relative window resolves to the
+    // last scan alone, the window is empty, and the expensive path is never
+    // exercised — which is how this measured fast while the real server took
+    // twelve seconds.
+    let mut clock = dutime::cli::now() - (scans as i64 + 1) * 3600;
     for s in 0..scans {
         let t0 = Instant::now();
-        let tree = build(dirs, s);
+        // The first scan is deliberately empty, mirroring a real history
+        // where the volume was unreadable on the first pass and the *second*
+        // scan carries every entity as a BORN event. That shape matters:
+        // with a non-empty first scan the window clamps to it and its events
+        // fall outside, so the expensive case never gets measured.
+        let tree = if s == 0 { build(0, 0) } else { build(dirs, s) };
         let built = t0.elapsed();
         let roll = tree.rollup();
         let stats = ScanStats {

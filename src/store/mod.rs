@@ -20,7 +20,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -124,7 +124,30 @@ impl Store {
                      {SCHEMA_VERSION}. Upgrade duTime or point at a different database."
                 );
             }
-            Some(_) => {}
+            Some(v) => {
+                // v1 -> v2: widen size_event_by_scan to cover the delta
+                // columns. `CREATE INDEX IF NOT EXISTS` in the schema cannot
+                // do this — the index already exists, narrower — so it has to
+                // be dropped and rebuilt. Costs about a second per million
+                // events and happens once.
+                if v < 2 {
+                    tracing::info!(
+                        "migrating schema v{v} -> v{SCHEMA_VERSION}: rebuilding the event \
+                         index (a few seconds on a large database)"
+                    );
+                    tx.execute_batch(
+                        "DROP INDEX IF EXISTS size_event_by_scan;
+                         CREATE INDEX size_event_by_scan
+                             ON size_event(scan_id, path_id, d_bytes, d_blocks);",
+                    )?;
+                }
+                if v < SCHEMA_VERSION {
+                    tx.execute(
+                        "UPDATE meta SET v = ?1 WHERE k = 'schema_version'",
+                        params![SCHEMA_VERSION],
+                    )?;
+                }
+            }
         }
         tx.commit()?;
         Ok(())
