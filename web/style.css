@@ -551,3 +551,21 @@ body:not(.loading) .card.busy > *:not(figcaption) { opacity: 0.4; }
    for every table and for the listing too — nothing here should ever be the
    reason the whole document grows a horizontal scrollbar. */
 #listing, #seriesTable, #gainTable, #changesTable, #diffTable { overflow-x: auto; }
+
+/* ── status line ─────────────────────────────────────────────────────── */
+
+#status {
+  padding: 14px 22px 26px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  /* Wraps rather than pushing the page wide, like everything else here. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 2px;
+  word-break: break-word;
+}
+#status .sep { margin: 0 8px; opacity: 0.6; }
+#status .wal { margin-left: 4px; }
+@media (max-width: 420px) { #status { padding: 12px 16px 22px; } }

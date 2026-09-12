@@ -44,6 +44,9 @@ pub struct AppState {
     readers: ReadPool,
     cache: Mutex<Cache>,
     pub auth: crate::auth::Auth,
+    /// Where the database lives, so its size can be reported. Empty for the
+    /// in-memory state used by tests.
+    db_path: PathBuf,
     /// Roots that need the token. Held here rather than in the database
     /// because it is an access policy for the network API, not a property of
     /// the recorded data — the local CLI can already read the filesystem.
@@ -110,6 +113,7 @@ impl AppState {
             cache: Mutex::new(Cache::default()),
             auth: crate::auth::Auth::Open,
             protected: std::collections::HashSet::new(),
+            db_path: PathBuf::new(),
         }
     }
 
@@ -129,6 +133,7 @@ impl AppState {
             cache: Mutex::new(Cache::default()),
             auth: crate::auth::Auth::Open,
             protected: std::collections::HashSet::new(),
+            db_path: path,
         })
     }
 
@@ -228,5 +233,26 @@ impl AppState {
             "budget_bytes": SNAPSHOT_CACHE_BYTES,
             "max_snapshots": MAX_CACHED_SNAPSHOTS,
         })
+    }
+}
+
+impl AppState {
+    /// How much disk the database occupies, main file and write-ahead log.
+    ///
+    /// Reported separately because they answer different questions: the main
+    /// file is how much history has accumulated, while a large WAL means a
+    /// checkpoint is overdue — normal during a commit, worth noticing if it
+    /// stays that way.
+    pub fn db_bytes(&self) -> (u64, u64) {
+        if self.db_path.as_os_str().is_empty() {
+            return (0, 0);
+        }
+        let at = |p: PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let wal = {
+            let mut w = self.db_path.clone().into_os_string();
+            w.push("-wal");
+            PathBuf::from(w)
+        };
+        (at(self.db_path.clone()), at(wal))
     }
 }

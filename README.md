@@ -170,7 +170,10 @@ inclusive, exportable as CSV.
 **Compare** — the diff treemap at the top of this page.
 
 Every view is linkable: the URL carries the path, window and comparison, so you
-can paste exactly what you are looking at into a ticket.
+can paste exactly what you are looking at into a ticket. A status line at the
+foot of the page names the build that is answering, when that binary was
+built, and how much disk the database is using — a tool that reports on disk
+usage should say what it costs.
 
 ## How it works
 

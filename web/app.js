@@ -247,6 +247,44 @@ async function api(path, params = {}) {
   return j;
 }
 
+/* The status line: which build is answering, and how much disk it is using.
+ *
+ * Which build matters because duTime is deployed by copying a binary to a
+ * server, and a version number alone cannot tell you whether the copy landed
+ * — it is identical across every build between releases. The commit and the
+ * binary's own mtime can.
+ *
+ * Its own size matters because a tool that reports on disk usage should be
+ * willing to say what it is costing.
+ */
+async function loadStatus() {
+  let h;
+  try {
+    h = await api('health');
+  } catch {
+    $('#status').textContent = '';
+    return;
+  }
+  const db = (h.db_bytes || 0) + (h.wal_bytes || 0);
+  const parts = [
+    `duTime ${escapeHtml(h.build || h.version || '')}`,
+    h.built_at ? `binary built ${escapeHtml(h.built_at)}` : null,
+    db ? `database ${fmtSize(db)}` : null,
+  ].filter(Boolean);
+
+  // The WAL only earns a mention when it is a real share of the total: during
+  // a commit it grows, and a number that moves for no visible reason invites
+  // more worry than it resolves.
+  const walNote = h.wal_bytes > (h.db_bytes || 0) / 10
+    ? ` (including ${fmtSize(h.wal_bytes)} of write-ahead log)` : '';
+  $('#status').innerHTML = parts.join('<span class="sep">·</span>')
+    + (walNote ? `<span class="wal">${escapeHtml(walNote)}</span>` : '');
+  $('#status').title = h.built_at
+    ? `Binary built ${h.built_at}. Database ${fmtSize(h.db_bytes || 0)}`
+      + ` plus ${fmtSize(h.wal_bytes || 0)} of write-ahead log.`
+    : '';
+}
+
 /** Reflect sign-in state in the header, and offer the way in. */
 async function refreshAuth() {
   let a;
@@ -1209,6 +1247,9 @@ async function init() {
   wireAuth();
   await refreshAuth();
   await boot();
+  // Last, and unawaited by the panes: a status line is not worth delaying
+  // the data for.
+  loadStatus();
 }
 
 /* Load the root list and settle on one.

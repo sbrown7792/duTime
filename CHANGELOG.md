@@ -10,6 +10,40 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.3.0 — 2026-09-12
+
+### Added
+
+- **A status line** at the foot of the page: which build is answering, when
+  that binary was built, and how much disk the database is using. The build
+  stamp is there because duTime is deployed by copying a binary to a server,
+  and a version number alone cannot tell you whether the copy landed.
+- **Per-pane progress.** Each card shows its own bar and dims its own body,
+  because the panes finish at different times and one page-wide bar that
+  clears when the last lands says nothing about which is still working.
+  Descending into a directory previously showed no feedback at all.
+
+### Fixed
+
+- **A window containing a baseline scan took 12 seconds.** The first full
+  scan of a volume emits one event per entity — 1,463,512 on a real Nextcloud
+  volume — and every window containing it had to resolve each one by climbing
+  its ancestors with a database lookup per level. Bands are now assigned by
+  walking down the subtree once, so each event is an array index: **12 s →
+  0.62 s**, and 12 ms once the baseline ages out of the window.
+- The per-pane progress bars pushed the document sideways and flashed a
+  horizontal scrollbar. Fixing that turned up three more sources of the same
+  thing at phone widths — the time slider, the tab row, and two tables — all
+  of which predated the bars.
+
+### Changed
+
+- **Schema version 2**: `size_event_by_scan` now covers the delta columns, so
+  reading a window is one sequential index scan instead of a seek per row.
+  1.34 s → 0.88 s on 1.3M events, for 4% more disk. Existing databases are
+  migrated on first start, which takes a few seconds on a large one.
+- "Trend" in the Contents pane now reads "Trend scale".
+
 ## 0.2.0 — 2026-09-11
 
 Everything here came out of running 0.1.0 on a real server.

@@ -480,3 +480,45 @@ async fn the_snapshot_cache_is_bounded_and_reports_itself() {
     );
     assert!(bytes > 0, "a cached snapshot reported zero size: {c}");
 }
+
+/// The status line's facts have to be real ones.
+///
+/// A version number cannot tell you whether a deployed copy landed — it is
+/// identical across every build between releases — so the page reports the
+/// commit and the binary's own mtime too, and its own database size. All of
+/// that has to survive being plumbed through the API.
+#[tokio::test]
+async fn health_reports_the_build_and_the_database_size() {
+    fs::create_dir_all("target/fixtures").unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("dutime-health-")
+        .tempdir_in("target/fixtures")
+        .unwrap();
+    let db = dir.path().join("h.db");
+
+    // A real file on disk, because the size is read with stat.
+    {
+        let store = Store::open(&db).unwrap();
+        store.ensure_root(std::path::Path::new("/tmp")).unwrap();
+    }
+    let state = Arc::new(AppState::open(&db).unwrap());
+    let h = get(&state, "/api/v1/health").await;
+
+    assert_eq!(h["status"], "ok");
+    assert_eq!(h["version"], env!("CARGO_PKG_VERSION"));
+    // The build stamp is the version plus something that identifies the
+    // build; the bare semver alone would defeat the point.
+    let build = h["build"].as_str().expect("no build stamp");
+    assert!(build.starts_with(env!("CARGO_PKG_VERSION")), "{build}");
+    assert!(build.len() > env!("CARGO_PKG_VERSION").len() + 4, "stamp carries no commit: {build}");
+
+    assert!(h["built_at"].is_string(), "no binary mtime: {h}");
+    let size = h["db_bytes"].as_u64().expect("no db size");
+    assert!(size > 0, "reported an empty database for a file that exists: {h}");
+    assert_eq!(
+        size,
+        fs::metadata(&db).unwrap().len(),
+        "reported size does not match the file on disk"
+    );
+    assert!(h["wal_bytes"].is_number(), "{h}");
+}

@@ -205,9 +205,18 @@ async fn health(State(s): State<Arc<AppState>>) -> ApiResult {
     blocking(move || {
         let store = s.read();
         let roots = store.roots()?;
+        let (db, wal) = s.db_bytes();
         Ok(json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
+            // The full stamp, so the page can say which build is running.
+            // A semver is identical across every build between releases, and
+            // "is the binary on that server the one I deployed?" is the
+            // question this is actually here to answer.
+            "build": crate::cli::VERSION,
+            "built_at": crate::cli::build_mtime(),
+            "db_bytes": db,
+            "wal_bytes": wal,
             "roots": roots.len(),
         }))
     })
