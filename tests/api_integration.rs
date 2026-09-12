@@ -521,4 +521,12 @@ async fn health_reports_the_build_and_the_database_size() {
         "reported size does not match the file on disk"
     );
     assert!(h["wal_bytes"].is_number(), "{h}");
+
+    // The footer's source link comes from Cargo.toml, so there is one place
+    // to change it rather than a URL copied into the JavaScript.
+    assert_eq!(h["repository"], option_env!("CARGO_PKG_REPOSITORY").unwrap_or_default());
+    assert!(
+        h["repository"].as_str().is_some_and(|r| r.starts_with("https://")),
+        "repository is not an absolute https URL: {h}"
+    );
 }

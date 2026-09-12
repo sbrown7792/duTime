@@ -266,10 +266,17 @@ async function loadStatus() {
     return;
   }
   const db = (h.db_bytes || 0) + (h.wal_bytes || 0);
+  // rel="noreferrer" is not boilerplate here: this page is usually served
+  // from an internal host, and without it the referrer hands that hostname
+  // to github.com on every click. It implies noopener too.
+  const repo = h.repository
+    ? `<a href="${escapeHtml(h.repository)}" target="_blank" rel="noreferrer">source</a>`
+    : null;
   const parts = [
     `duTime ${escapeHtml(h.build || h.version || '')}`,
     h.built_at ? `binary built ${escapeHtml(h.built_at)}` : null,
     db ? `database ${fmtSize(db)}` : null,
+    repo,
   ].filter(Boolean);
 
   // The WAL only earns a mention when it is a real share of the total: during
@@ -862,6 +869,9 @@ async function loadListing() {
   const gen = loadGen;
   let d;
   try {
+    // Deliberately no `at`: the listing answers "what is here now, and how
+    // did it change over the window". The time slider belongs to the blocks
+    // pane and moves only that.
     d = await api('listing', { path: state.path, from: state.window, points: 40, limit: 400 });
   } catch (e) {
     if (!isCurrent(gen)) return;
@@ -1226,7 +1236,10 @@ async function init() {
     state.scanIdx = Number(e.target.value);
     updateTimeLabel();
   });
-  $('#timeSlider').addEventListener('change', () => { loadTreemap(); loadListing(); });
+  // Only the blocks. It used to also re-fetch the listing, with parameters
+  // the slider does not appear in — a request per drag that could not change
+  // anything on screen.
+  $('#timeSlider').addEventListener('change', () => loadTreemap());
 
   $('#diffFrom').addEventListener('change', () => { loadDiff(); syncHash(); });
   $('#diffTo').addEventListener('change', () => { loadDiff(); syncHash(); });

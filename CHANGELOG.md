@@ -2,13 +2,32 @@
 
 Versions are bumped per batch of user-visible change, not per commit. While
 duTime is pre-1.0 the minor number moves for features and notable fixes, the
-patch number for fixes alone.
+patch number for fixes and cosmetic additions — minting a minor release for a
+link in a footer would make the numbers mean less, not more.
 
 Between releases, `dutime --version` identifies a build exactly: it carries
 the commit and commit date, and `dutime doctor` adds the binary's own mtime.
 That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
+
+## 0.3.1 — 2026-09-12
+
+- The status line links to the repository. The URL comes from `Cargo.toml`, so
+  it is not a copy pasted into the page, and the link carries `rel="noreferrer"`
+  — duTime is usually served from an internal host, and the default would hand
+  that hostname to github.com on every click.
+- **The Explorer is reordered**: Contents, then Composition over time, then
+  Blocks. The breadcrumbs stay at the top, since they steer every pane; the
+  time slider moved down with the treemap, because it only ever applied to
+  that one.
+- Dragging the slider no longer re-fetches the Contents listing. The slider
+  does not appear in that request's parameters, so it was a request per drag
+  that could not change anything on screen.
+- A relative window given alongside an explicit `at` is now measured from that
+  moment rather than from the wall clock. Only reachable through the API —
+  `?at=scan:5&from=-24h` previously meant the day before *now*, which could end
+  before it began.
 
 ## 0.3.0 — 2026-09-12
 

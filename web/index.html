@@ -75,22 +75,11 @@
 
   <!-- ───────────────────────── Explorer ───────────────────────── -->
   <section id="view-explorer" class="view">
-    <div class="card" id="pane-treemap">
-      <div class="rowctl">
-        <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
-        <div class="spacer"></div>
-        <div class="slider">
-          <label for="timeSlider">As of</label>
-          <input type="range" id="timeSlider" min="0" max="0" value="0" step="1">
-          <output id="timeLabel">—</output>
-        </div>
-      </div>
-      <div class="plot tall" id="treemap"></div>
-      <p class="note">
-        Area is size. Shade deepens with nesting depth — hierarchy is read from the
-        nested rectangles, not from colour. Click to descend; drag the slider to see
-        the same tree at an earlier moment.
-      </p>
+    <!-- Where you are, kept at the top: the breadcrumbs steer every pane
+         below. The time slider is not here — it moves the blocks only, so it
+         lives in that card. -->
+    <div class="card slim" id="pane-nav">
+      <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
     </div>
 
     <figure class="card" id="pane-contents">
@@ -122,6 +111,30 @@
         <summary>Table view</summary>
         <div id="seriesTable"></div>
       </details>
+    </figure>
+
+    <figure class="card" id="pane-treemap">
+      <figcaption>
+        <h2>Blocks</h2>
+        <p class="sub">
+          Area is size. Shade deepens with nesting depth — hierarchy is read from
+          the nested rectangles, not from colour. Click to descend.
+        </p>
+      </figcaption>
+      <div class="rowctl">
+        <div class="spacer"></div>
+        <div class="slider">
+          <label for="timeSlider">As of</label>
+          <input type="range" id="timeSlider" min="0" max="0" value="0" step="1">
+          <output id="timeLabel">—</output>
+        </div>
+      </div>
+      <div class="plot tall" id="treemap"></div>
+      <p class="note">
+        The slider redraws these blocks as the tree stood at that moment. It
+        applies to this pane only — Contents and Composition above always show
+        the present.
+      </p>
     </figure>
   </section>
 

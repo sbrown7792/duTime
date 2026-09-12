@@ -130,12 +130,13 @@ once for every directory above it.
 days-to-full projection that refuses to guess until it has a real window to
 extrapolate from.
 
-**Explorer** — a WinDirStat-style treemap with a time slider; drag it and the
-same tree redraws as it stood at that moment. Below it, a sortable listing of
-everything in the current directory with a **trend sparkline beside each row**,
-so you can see which of thirty siblings is the one creeping up before deciding
-which to open. Then the same directory decomposed into its largest children as
-a stacked area.
+**Explorer** — a sortable listing of everything in the current directory with
+a **trend sparkline beside each row**, so you can see which of thirty siblings
+is the one creeping up before deciding which to open. Then the same directory
+decomposed into its largest children as a stacked area. Then a WinDirStat-style
+treemap with a time slider; drag it and the same tree redraws as it stood at
+that moment. The slider applies to the treemap alone — the panes above it
+always show the present.
 
 Each pane reports its own progress — they finish at different times, and a
 single page-wide spinner that clears when the last one lands tells you

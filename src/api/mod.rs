@@ -179,9 +179,24 @@ impl AppState {
         Ok(roots)
     }
 
-    /// Resolve a time expression to a concrete scan.
+    /// Resolve a time expression to a concrete scan, relative to now.
     fn pick_scan(&self, root: RootId, at: &Option<String>) -> anyhow::Result<(ScanId, i64)> {
-        let now = crate::cli::now();
+        self.pick_scan_from(root, at, crate::cli::now())
+    }
+
+    /// Resolve a time expression against an arbitrary anchor.
+    ///
+    /// A window's start is anchored to the moment being *viewed*, not to the
+    /// wall clock. With the time slider dragged back three days, "-24h" has
+    /// to mean the day before that moment; measuring it from now would show
+    /// a window that ends three days before it begins.
+    fn pick_scan_from(
+        &self,
+        root: RootId,
+        at: &Option<String>,
+        anchor: i64,
+    ) -> anyhow::Result<(ScanId, i64)> {
+        let now = anchor;
         let spec = at.as_deref().unwrap_or("now");
         let store = self.read();
         match crate::cli::timespec::parse(spec, now)? {
@@ -217,6 +232,7 @@ async fn health(State(s): State<Arc<AppState>>) -> ApiResult {
             "built_at": crate::cli::build_mtime(),
             "db_bytes": db,
             "wal_bytes": wal,
+            "repository": option_env!("CARGO_PKG_REPOSITORY").filter(|s| !s.is_empty()),
             "roots": roots.len(),
         }))
     })
@@ -789,7 +805,8 @@ async fn series(
         let root = s.pick_root(q.root, viewer)?;
         let metric = metric_of(&q.metric);
         let (s2, at2) = s.pick_scan(root, &q.to)?;
-        let (s1, at1) = s.pick_scan(root, &Some(q.from.clone().unwrap_or_else(|| "-7d".into())))
+        let (s1, at1) = s
+            .pick_scan_from(root, &Some(q.from.clone().unwrap_or_else(|| "-7d".into())), at2)
             .or_else(|_| {
                 let st = s.read();
                 st.first_scan(root)?
@@ -1241,10 +1258,11 @@ async fn listing(
         // history, which would report the baseline's births as growth.
         let (s1, at1, clamped) = {
             let store = s.read();
-            let now = crate::cli::now();
+            // Anchored to the moment being viewed, not the wall clock: with
+            // the slider dragged back, "-24h" is the day before *that*.
             let want = match crate::cli::timespec::parse(
                 q.from.as_deref().unwrap_or("-7d"),
-                now,
+                at2,
             )? {
                 crate::cli::timespec::Target::Scan(id) => {
                     let at = store.conn.query_row(
