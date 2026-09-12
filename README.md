@@ -61,10 +61,11 @@ $ cargo build --release                            # on a build machine
 $ scp target/release/dutime yourserver:/tmp/
 $ ssh yourserver 'sudo install -m755 /tmp/dutime /usr/bin/dutime'
 $ ssh yourserver 'dutime --version'
-dutime 0.1.0 (0d8da3ba74 2026-09-10)
+dutime 0.2.0 (037585ceba 2026-09-11)
 ```
 
-**Check that last line.** `--version` carries the commit and the build date,
+**Check that last line.** `--version` carries the version, the commit and the
+build date,
 and `dutime doctor` and the startup log both add the binary's own mtime, so
 "is the thing running there the thing I just built?" is answerable rather
 than assumed. The commonest reason a fix appears not to work is `cargo build`
@@ -469,6 +470,7 @@ API latency during a scan is ~160 ms. If you see seconds, open an issue with
 ## Status
 
 Working: scanner, store, query layer, CLI, daemon, REST API, web UI.
+Released versions and what changed in each: [CHANGELOG.md](CHANGELOG.md).
 
 Not yet: retention tiering (unnecessary at current volumes — see
 [docs/storage.md](docs/storage.md)), move detection, alerting, and fleet

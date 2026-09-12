@@ -1,0 +1,91 @@
+# Changelog
+
+Versions are bumped per batch of user-visible change, not per commit. While
+duTime is pre-1.0 the minor number moves for features and notable fixes, the
+patch number for fixes alone.
+
+Between releases, `dutime --version` identifies a build exactly: it carries
+the commit and commit date, and `dutime doctor` adds the binary's own mtime.
+That is what answers "is the thing running on that server the thing I just
+built?", which a semver cannot, since it is identical across every build
+between releases.
+
+## 0.2.0 — 2026-09-11
+
+Everything here came out of running 0.1.0 on a real server.
+
+### Added
+
+- **Explorer directory listing.** Every entry in the current directory with
+  its size, its change over the window, and a **trend sparkline** per row, so
+  you can see which of thirty siblings is the one creeping up before deciding
+  which to open. Sortable; rows descend into directories.
+- **Two trend scales.** *Per row* gives each row its own height and shows
+  shape. *Shared* sets the height from the largest movement on the page, so
+  the biggest mover fills its cell and everything else is drawn to the same
+  ruler. Remembered per browser, carried in the permalink.
+- **A row to walk back up** (`..`), so navigating out does not mean moving to
+  the breadcrumbs. Rows are keyboard-reachable.
+- **Per-root access control.** Mark a root `protected = true` and it needs a
+  bearer token; unprotected roots stay open, so a shared dashboard can show
+  the system disk while a Nextcloud volume stays shut. Anonymous callers are
+  not told a protected root exists. Sign in from the UI; `dutime token`
+  generates one.
+- **`dutime config --check`**, which prints what a config resolves to rather
+  than only whether it parses, and warns about nested roots.
+- **`dutime doctor` network section**: bound address, systemd's IP filter, a
+  reachability probe, and every URL the host answers on.
+- **`dutime token`**, and `dutime install --listen`, which writes the config
+  and the unit's IP filter together.
+- **Access logging** (`access_log = true`), a loading indicator on root
+  changes, and `/api/v1/cache` reporting snapshot cache occupancy.
+
+### Fixed
+
+- **Default excludes silently dropped 71,516 files / 18.9 GiB.** `/snap/` as
+  a gitignore pattern anchors to the scan root, so it matched `$HOME/snap`.
+  Absolute excludes are now separate from relative ones.
+- **An unreadable directory was reported as a smaller number.** 11 MB behind
+  a `chmod 000` directory came back as 1.9 MiB with the scan marked `ok` —
+  indistinguishable from a real shrink, which is the one confusion duTime
+  exists to prevent. Such scans are `partial`, name the paths, and show a
+  banner.
+- **A filesystem mounted under a root was skipped and recorded nowhere**, so
+  duTime could report "no mount was skipped" while a whole volume sat
+  unscanned beneath it.
+- **NFS advice was wrong.** `CAP_DAC_READ_SEARCH` does nothing on a network
+  share, where the server checks the uid. duTime now names the filesystem
+  type and both uids.
+- **The service bound `0.0.0.0` and silently dropped every packet**, because
+  the shipped unit carries `IPAddressAllow=localhost`.
+- The UI froze during a scan commit, and the Contents column ran off the card
+  on directories with millions of files.
+
+### Performance
+
+Measured on a synthetic 1.3M-entity volume
+(`cargo run --release --example bench_large`):
+
+| | 0.1.0 | 0.2.0 |
+|---|---|---|
+| Contents | 2.3 s | 0.014 s |
+| Stacked area | 2.8 s | 0.014 s |
+| Worst-case API latency during a scan | 680 ms | 164 ms |
+
+The snapshot cache is bounded in bytes rather than in snapshots — eight
+snapshots of a large root is 1.8 GB against a unit that capped the service at
+1 GB. Resident memory on that fixture went from 1.1 GB to ~470 MB, and the
+unit now allows 2 GB.
+
+### Changed
+
+- `MemoryHigh`/`MemoryMax` raised to 1G/2G. Memory scales with entity count,
+  and being OOM-killed mid-scan is worse than using the memory.
+- The up row's tooltip no longer shows the parent's change; deriving it meant
+  reading the whole subtree for a tooltip.
+
+## 0.1.0 — 2026-09-10
+
+Initial build; never tagged. Scanner with `du`-exact accounting, the
+change-only event store, the query layer, the CLI, the daemon, the REST API
+and the web UI.
