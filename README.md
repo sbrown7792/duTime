@@ -441,9 +441,18 @@ after a root change:
 
 | | before | after |
 |---|---|---|
-| treemap | 2.0 s | 2.0 s cold, 0.06 s warm |
-| **Contents** | **2.3 s** | **0.014 s** |
-| **stacked area** | **2.8 s** | **0.014 s** |
+| treemap | 2.0 s | 2.0 s cold, 0.08 s warm |
+| **Contents**, ordinary window | **2.3 s** | **0.012 s** |
+| **Contents**, window containing a baseline scan | **12 s** | **0.62 s** |
+| **stacked area**, ditto | **7.5 s** | **0.64 s** |
+
+The second and third rows are the case that bites once a volume has been
+scanned for the first time. That scan emits one event per entity — 1,463,512
+on a real Nextcloud volume — and every window containing it has to account for
+all of them. Both panes used to resolve each event to a child by climbing its
+ancestors with a database lookup per level; they now walk *down* the subtree
+once, so each event is an array index, and the event index covers the delta
+columns so reading a window is a single sequential scan.
 
 The Contents pane was materialising the whole tree a *second* time just to
 learn each child's size at the start of the window; it now derives that from

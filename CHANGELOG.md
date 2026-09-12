@@ -68,8 +68,9 @@ Measured on a synthetic 1.3M-entity volume
 
 | | 0.1.0 | 0.2.0 |
 |---|---|---|
-| Contents | 2.3 s | 0.014 s |
-| Stacked area | 2.8 s | 0.014 s |
+| Contents, ordinary window | 2.3 s | 0.012 s |
+| Contents, window containing a baseline scan | 12 s | 0.62 s |
+| Stacked area, ditto | 7.5 s | 0.64 s |
 | Worst-case API latency during a scan | 680 ms | 164 ms |
 
 The snapshot cache is bounded in bytes rather than in snapshots — eight
