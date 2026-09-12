@@ -645,40 +645,50 @@ async function loadSeries() {
  * 200 children would otherwise mean 200 ECharts instances, each with its own
  * canvas and resize observer.
  *
- * Two scales, because they answer different questions and neither answers
- * both.
+ * Both scales measure **movement**, and differ only in whose movement sets
+ * the height. Every row is drawn from its own low point, so a 400 GB
+ * directory and a 4 MB one are compared on how much they moved rather than
+ * on how big they are — the Size column already answers how big.
  *
- * **Per row** (`domain` omitted) scales each row to its own min and max. It
- * shows *shape*: rows here differ by orders of magnitude, so one shared scale
- * flattens every small directory to a dead line, and a directory quietly
- * doubling from 40 MB is exactly the thing you want to catch early.
+ * **Per row** (`swing` omitted) gives each row its own full height. It shows
+ * *shape*: a directory quietly doubling from 40 MB looks as dramatic as one
+ * adding 400 GB, which is exactly what you want when hunting for something
+ * starting to run away.
  *
- * **Shared** takes an explicit domain covering every row, so a given height
- * means the same number of bytes everywhere and the biggest movers are
- * obvious at a glance. That domain starts at **zero**, not at the smallest
- * value across the rows: these marks are filled areas, and a filled area on a
- * non-zero baseline overstates every difference — 380 GB and 420 GB would
- * render as a tenfold gap. Per-row mode accepts that distortion knowingly in
- * exchange for showing shape; shared mode exists to compare magnitudes, so it
- * cannot.
+ * **Shared** takes one `swing` — the largest movement on the page — so the
+ * biggest mover fills the cell top to bottom and everything else is drawn to
+ * that same ruler. A row that moved a tenth as much is a tenth as tall.
+ *
+ * The height deliberately spans movement rather than starting at zero. An
+ * axis from zero would put every row's line at its absolute size, where the
+ * interesting 20 GB of growth on a 400 GB volume is a 5% wiggle near the top
+ * and the row that actually matters is invisible.
+ *
+ * The swing is peak-to-trough, not first-to-last, and it has to be: a
+ * directory that gained 700 GB and gave it back nets zero but still needs
+ * 700 GB of vertical room, and a scale that did not allow for it would clip
+ * the line straight out of the cell.
  *
  * In neither mode is the magnitude left to the picture: the size and change
- * columns carry the real figures and the row title gives the range.
+ * columns carry the real figures and the row title gives both the range and
+ * the swing.
  */
-function sparkSvg(vals, domain = null, w = 132, h = 24) {
+function sparkSvg(vals, swing = null, w = 132, h = 24) {
   const pad = 2;
   if (!vals || vals.length === 0) return '';
-  const min = domain ? domain.min : Math.min(...vals);
-  const max = domain ? domain.max : Math.max(...vals);
-  const span = max - min;
+  const min = Math.min(...vals);
+  const own = Math.max(...vals) - min;
+  const span = swing ?? own;
   const iw = w - pad * 2, ih = h - pad * 2;
 
-  // A directory that never moved gets a flat rule, not a spike from noise.
-  // Only when the *domain* is degenerate, though: in shared mode an unchanged
-  // row still has a meaningful height, and drawing it mid-chart would put a
-  // 2 MB directory level with a 400 GB one.
-  if (span === 0) {
-    const y = (h / 2).toFixed(1);
+  // A row that never moved gets a muted rule, in either mode. On the shared
+  // ruler it would otherwise draw as a live line along the floor, which reads
+  // as data when the point is that there is none — and "didn't move" should
+  // look the same whichever scale you are on. It sits at the floor there,
+  // because that is where the shared scale genuinely puts it, and mid-cell in
+  // per-row mode, where the cell has no vertical meaning at all.
+  if (own === 0 || span === 0) {
+    const y = (span === 0 || swing == null ? h / 2 : h - pad).toFixed(1);
     return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">`
       + `<line x1="${pad}" y1="${y}" x2="${w - pad}" y2="${y}" `
       + `stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" opacity="0.55"/></svg>`;
@@ -720,20 +730,28 @@ async function loadListing() {
   const sortAttr = (k) =>
     state.listSort === k ? ` aria-sort="${state.listDesc ? 'descending' : 'ascending'}"` : '';
 
-  // One domain for every row, from zero to the largest value any row reaches.
-  // Computed over the rows actually shown, so hiding or truncating entries
-  // cannot leave the scale pinned to something that is not on screen.
+  // How far a row travelled between its low and high point. Peak-to-trough
+  // rather than start-to-end, so a spike that came and went still reserves
+  // the room it needs instead of being clipped out of the cell.
+  const swingOf = (r) =>
+    r.spark && r.spark.length ? Math.max(...r.spark) - Math.min(...r.spark) : 0;
+
+  // One ruler for the page, set by the biggest mover on it — that row fills
+  // its cell top to bottom and every other is drawn to the same scale.
+  // Measured over the rows actually shown, so re-sorting or truncating cannot
+  // leave the scale pinned to something off screen.
   const shared = state.sparkScale === 'absolute';
-  const ceiling = shared
-    ? Math.max(0, ...rows.flatMap((r) => r.spark || []))
-    : 0;
-  const domain = shared ? { min: 0, max: ceiling } : null;
+  const biggest = shared ? Math.max(0, ...rows.map(swingOf)) : 0;
+  const scale = shared ? biggest : null;
 
   const body = rows.map((r) => {
     const dirish = r.kind === 'dir';
+    // The swing is what the picture encodes, so name it — otherwise a row
+    // that spiked and came back reads as a mystery.
     const range = r.spark && r.spark.length
       ? `${fmtSize(r.spark[0])} → ${fmtSize(r.spark[r.spark.length - 1])}`
-        + (shared ? ` (of ${fmtSize(ceiling)} full height)` : '')
+        + ` · moved ${fmtSize(swingOf(r))}`
+        + (shared ? ` of ${fmtSize(biggest)} full height` : '')
       : '';
     const count = dirish ? `${fmtCount(r.dirs)} dirs, ${fmtCount(r.files)} files` : '';
     const countExact = dirish
@@ -745,7 +763,7 @@ async function loadListing() {
       </td>
       <td class="num sz">${fmtSize(r.size)}</td>
       <td class="num dl ${r.delta > 0 ? 'up' : r.delta < 0 ? 'down' : ''}">${r.delta ? fmtDelta(r.delta) : '—'}</td>
-      <td class="trend" title="${range}">${sparkSvg(r.spark, domain)}</td>
+      <td class="trend" title="${range}">${sparkSvg(r.spark, scale)}</td>
       <td class="num ct" title="${countExact}">${count}</td>
     </tr>`;
   }).join('');
@@ -798,8 +816,8 @@ async function loadListing() {
     + (d.window_clamped_to_first_scan ? ' (all the history there is)' : '')
     // A shared scale is only readable if you are told what it is.
     + (shared
-      ? ` · trends share one scale, 0 to ${fmtSize(ceiling)}`
-      : ' · each trend scaled to its own range');
+      ? ` · trends share one scale, full height = ${fmtSize(biggest)} of movement`
+      : ' · each trend scaled to its own movement');
 
   $$('#listing tr.clickable').forEach((tr) => {
     const go = () => {

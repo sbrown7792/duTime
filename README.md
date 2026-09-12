@@ -136,13 +136,26 @@ so you can see which of thirty siblings is the one creeping up before deciding
 which to open. Then the same directory decomposed into its largest children as
 a stacked area.
 
-Those trends have two scales, because they answer different questions.
-**Per row** gives each its own range and shows *shape* — a directory quietly
-doubling from 40 MB looks as dramatic as one adding 400 GB, which is the point
-when you are hunting for something starting to run away. **Shared** puts every
-row on one scale from zero, so a given height means the same number of bytes
-in every row and the consequential movers are obvious. The choice is
-remembered and travels in the permalink.
+Both scales measure **movement**, and differ only in whose movement sets the
+height — every row is drawn from its own low point, because the Size column
+already answers how big a directory is.
+
+**Per row** gives each row the full height of its own cell and shows *shape*:
+a directory quietly doubling from 40 MB looks as dramatic as one adding
+400 GB, which is the point when you are hunting for something starting to run
+away.
+
+**Shared** takes the largest movement on the page, so that row fills its cell
+top to bottom and everything else is drawn to the same ruler — a row that
+moved a tenth as much is a tenth as tall. On a volume holding a static 400 GB
+archive and a log growing by 21 GB, the log fills the cell and the archive is
+a flat rule; an axis anchored at zero would instead render that growth as a
+5% wiggle near the top and bury the one row that mattered.
+
+The swing is peak-to-trough rather than first-to-last, and has to be: a
+directory that gained 700 GB and gave it back nets zero but still needs the
+vertical room, and a scale that ignored it would clip the line out of the
+cell. The choice is remembered and travels in the permalink.
 
 ![Explorer](docs/explorer.png)
 
