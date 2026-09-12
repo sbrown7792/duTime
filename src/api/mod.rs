@@ -25,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
@@ -45,6 +46,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/listing", get(listing))
         .route("/api/v1/gainers", get(gainers))
         .route("/api/v1/auth", get(auth_status))
+        .route("/api/v1/cache", get(cache_status))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::middleware,
@@ -808,7 +810,6 @@ async fn series(
             band_of.insert(snap.ids[k as usize], bi);
         }
         const OTHER: usize = usize::MAX - 1;
-        const SELF_BAND: usize = usize::MAX;
 
         let store = s.read();
 
@@ -821,32 +822,17 @@ async fn series(
         // deletion is silently dropped — the band keeps the bytes forever and the
         // stack drifts above the real total. Caught on demo data as a 16.8 MB
         // overstatement of /var after a package cache was cleared.
-        let mut parent_of: std::collections::HashMap<PathId, Option<PathId>> = Default::default();
-        {
-            let mut ps = store.conn.prepare(
-                "SELECT path_id, parent_id FROM path
-                 WHERE root_id = ?1 AND born_scan <= ?2
-                   AND (died_scan IS NULL OR died_scan > ?3)",
-            )?;
-            let rows = ps.query_map([root, s2, s1], |r| {
-                Ok((r.get::<_, PathId>(0)?, r.get::<_, Option<PathId>>(1)?))
-            })?;
-            for row in rows {
-                let (id, par) = row?;
-                parent_of.insert(id, par);
-            }
-        }
+        let mut ancestry = Ancestry::new(&store.conn);
         let node_id = snap.ids[node as usize];
 
-        // Starting value for each band, plus the directory's own files.
-        let mut level: Vec<i64> = Vec::with_capacity(bands.len() + 2);
-        for &k in &bands {
-            level.push(query::incl_at(&store, snap.ids[k as usize], s1)?.0);
-        }
-        let node_total_start = query::incl_at(&store, snap.ids[node as usize], s1)?.0;
-        let kids_start: i64 = level.iter().sum();
-        let other_and_own = node_total_start - kids_start;
-        level.push(other_and_own.max(0)); // "everything else"
+        // Starting values are filled in after the window's events are read:
+        // each band's size now, minus what the window did to it.
+        //
+        // This used to call `incl_at` once per band, which reconstructs a
+        // subtree total by walking every descendant. For a child of a 1.3M
+        // entity root that is a million rows, nine times per request, and it
+        // measured at 2.8 seconds with every cache already warm.
+        let mut level: Vec<i64> = vec![0; bands.len() + 1];
 
         // Every scan in the window becomes an x position.
         let mut st = store.conn.prepare(&format!(
@@ -878,32 +864,33 @@ async fn series(
                 continue;
             }
             // Walk up until we hit a band, the node itself, or leave the subtree.
-            let mut cur = pid;
-            let mut band = None;
-            loop {
-                if let Some(&b) = band_of.get(&cur) {
-                    band = Some(b);
-                    break;
-                }
-                if cur == node_id {
-                    band = Some(SELF_BAND);
-                    break;
-                }
-                match parent_of.get(&cur) {
-                    Some(Some(p)) => cur = *p,
-                    // Either the root, or an ancestor outside the window.
-                    _ => break,
-                }
-            }
-            let slot = match band {
-                Some(SELF_BAND) => OTHER,
-                Some(b) => b,
-                None => continue, // outside this subtree entirely
+            let slot = match ancestry.band(&band_of, node_id, pid)? {
+                Climb::Band(b) => b,
+                Climb::Own => OTHER,
+                Climb::Outside => continue,
             };
             by_scan.entry(sid).or_default().push((slot, d));
         }
 
         let n_bands = level.len();
+
+        // Wind back from the end of the window to its start: every band's
+        // size now, less what the window's events did to it. The last band is
+        // "everything else" — whatever the directory holds beyond its top
+        // children, which is its total less those children.
+        {
+            let mut totals = vec![0i64; n_bands];
+            for deltas in by_scan.values() {
+                for &(slot, d) in deltas {
+                    totals[if slot == OTHER { n_bands - 1 } else { slot.min(n_bands - 1) }] += d;
+                }
+            }
+            let kids_now: i64 = bands.iter().map(|&k| val(k)).sum();
+            for (i, &k) in bands.iter().enumerate() {
+                level[i] = val(k) - totals[i];
+            }
+            level[n_bands - 1] = (val(node) - kids_now) - totals[n_bands - 1];
+        }
         let mut points: Vec<Vec<i64>> = vec![Vec::with_capacity(scan_list.len()); n_bands];
         let mut times: Vec<i64> = Vec::with_capacity(scan_list.len());
         for (sid, t) in &scan_list {
@@ -1064,6 +1051,89 @@ async fn gainers(
 }
 
 
+/// Parent links, fetched one at a time and remembered.
+///
+/// Both the stacked area and the listing need to know which child of the
+/// directory being viewed each event belongs under, which means walking up
+/// from the event's path. The obvious way to do that is to load
+/// `path_id -> parent_id` for the whole root into a map, and that is what
+/// this used to do — 1.3M rows built into a HashMap on every request, which
+/// measured at 320ms for the listing and did not improve with any cache,
+/// because the cost was the load itself.
+///
+/// A window holds a few hundred events and the mean directory depth is around
+/// nine, so the climb touches a few thousand rows at the very most, and
+/// usually far fewer once the memo starts hitting. Each is a primary-key
+/// lookup.
+///
+/// Deliberately *not* filtered by liveness: an event may belong to a path
+/// deleted mid-window, and its ancestors may be gone too, but the rows are
+/// still there and the climb still has to work. Filtering on `died_scan`
+/// would silently drop the deletions — the very events that explain a drop.
+struct Ancestry<'a> {
+    conn: &'a rusqlite::Connection,
+    parent: std::collections::HashMap<PathId, Option<PathId>>,
+}
+
+impl<'a> Ancestry<'a> {
+    fn new(conn: &'a rusqlite::Connection) -> Self {
+        Self { conn, parent: Default::default() }
+    }
+
+    fn parent_of(&mut self, id: PathId) -> anyhow::Result<Option<PathId>> {
+        if let Some(&p) = self.parent.get(&id) {
+            return Ok(p);
+        }
+        let p: Option<PathId> = self
+            .conn
+            .query_row("SELECT parent_id FROM path WHERE path_id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        self.parent.insert(id, p);
+        Ok(p)
+    }
+
+    /// Climb from `from` to whichever entry of `bands` contains it.
+    ///
+    /// `Ok(None)` means the climb left the subtree without meeting one —
+    /// either it reached `node_id` itself (the directory's own files) or ran
+    /// off the top of the tree.
+    fn band(
+        &mut self,
+        bands: &std::collections::HashMap<PathId, usize>,
+        node_id: PathId,
+        from: PathId,
+    ) -> anyhow::Result<Climb> {
+        let mut cur = from;
+        // Bounded so a cycle in the dictionary cannot hang a request. Real
+        // depth is single digits; 512 is far past anything a filesystem
+        // produces and still terminates instantly if the data is corrupt.
+        for _ in 0..512 {
+            if let Some(&b) = bands.get(&cur) {
+                return Ok(Climb::Band(b));
+            }
+            if cur == node_id {
+                return Ok(Climb::Own);
+            }
+            match self.parent_of(cur)? {
+                Some(p) => cur = p,
+                None => return Ok(Climb::Outside),
+            }
+        }
+        Ok(Climb::Outside)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Climb {
+    /// Landed on one of the listed children.
+    Band(usize),
+    /// Reached the viewed directory itself: its own files, no child.
+    Own,
+    /// Left the subtree entirely.
+    Outside,
+}
+
 // ── directory listing with trend sparklines ──────────────────────────────
 
 #[derive(Deserialize)]
@@ -1135,8 +1205,13 @@ async fn listing(
             }
         };
 
+        // One snapshot, not two. Sizes at the start of the window are derived
+        // from the end of it by subtracting the window's own events — the
+        // invariant the store is built on — rather than by materialising the
+        // whole tree a second time. On a 1.3M-entity volume that second build
+        // measured at two seconds, and it happened every time the directory
+        // listing was drawn.
         let snap = s.snapshot(root, s2)?;
-        let base = s.snapshot(root, s1)?;
         let node = locate(&snap, q.path.as_deref())?;
         let limit = q.limit.unwrap_or(500).min(5000);
         let points = q.points.unwrap_or(32).clamp(2, 240);
@@ -1152,14 +1227,12 @@ async fn listing(
         kids.sort_by_key(|&c| std::cmp::Reverse(size_of(&snap, c)));
         kids.truncate(limit);
 
-        // Seed from the snapshot at the window's start rather than a query
-        // per child: snapshots are cached, so this is a lookup each.
-        let mut level: Vec<i64> = kids
-            .iter()
-            .map(|&c| base.idx(snap.ids[c as usize]).map(|i| size_of(&base, i)).unwrap_or(0))
-            .collect();
+        // Seeded with the size *now*; `sparklines` winds each one back to the
+        // start of the window using the events it reads anyway.
+        let mut level: Vec<i64> = kids.iter().map(|&c| size_of(&snap, c)).collect();
 
-        let spark = sparklines(&s, root, &snap, node, &kids, s1, s2, metric, &mut level, points)?;
+        let (spark, totals, own_total) =
+            sparklines(&s, root, &snap, node, &kids, s1, s2, metric, &mut level, points)?;
 
         // The row that walks back up. Resolved here rather than by trimming
         // the displayed path in the browser: a path component that is not
@@ -1169,14 +1242,15 @@ async fn listing(
             crate::model::tree::NO_PARENT => Value::Null,
             p => {
                 let pi = p as usize;
-                let now = size_of(&snap, p);
-                let then = base.idx(snap.ids[pi]).map(|k| size_of(&base, k)).unwrap_or(0);
+                // Size only. The parent's change over the window would need
+                // the events under *its* whole subtree, which is a different
+                // and much larger question than this listing asks — and it
+                // appears nowhere but the up row's tooltip.
                 let mut v = name_json(&snap.name[pi]);
                 let o = v.as_object_mut().unwrap();
                 o.insert("id".into(), json!(snap.ids[pi]));
                 o.insert("path".into(), path_json(&snap.path_of(p)));
-                o.insert("size".into(), json!(now));
-                o.insert("delta".into(), json!(now - then));
+                o.insert("size".into(), json!(size_of(&snap, p)));
                 v
             }
         };
@@ -1185,13 +1259,7 @@ async fn listing(
             Metric::Allocated => snap.own_blocks[node as usize],
             Metric::Apparent => snap.own_bytes[node as usize],
         };
-        let own_then = base
-            .idx(snap.ids[node as usize])
-            .map(|i| match metric {
-                Metric::Allocated => base.own_blocks[i as usize],
-                Metric::Apparent => base.own_bytes[i as usize],
-            })
-            .unwrap_or(0);
+        let own_then = own_now - own_total;
 
         let rows: Vec<Value> = kids
             .iter()
@@ -1199,10 +1267,7 @@ async fn listing(
             .map(|(bi, &c)| {
                 let i = c as usize;
                 let now = size_of(&snap, c);
-                let then = base
-                    .idx(snap.ids[i])
-                    .map(|k| size_of(&base, k))
-                    .unwrap_or(0);
+                let then = now - totals[bi];
                 let mut v = name_json(&snap.name[i]);
                 let o = v.as_object_mut().unwrap();
                 o.insert("id".into(), json!(snap.ids[i]));
@@ -1239,8 +1304,16 @@ async fn listing(
 
 /// Per-child value series across the window, downsampled to `points`.
 ///
-/// `level` arrives holding each child's size at the start of the window and is
-/// advanced in place as the window's events are replayed.
+/// `level` arrives holding each child's size at the **start** of the window;
+/// the caller derives that by subtracting the totals this function returns
+/// from the sizes it already has at the end of the window, so no second
+/// snapshot of the tree is needed. The totals are returned alongside the
+/// series for that purpose.
+///
+/// Two passes over the window's events: one to resolve each to a child and
+/// total it, one to replay them in order. Events number in the hundreds even
+/// on a large volume — the storage is change-only — so the second pass costs
+/// nothing next to materialising a whole tree.
 #[allow(clippy::too_many_arguments)]
 fn sparklines(
     s: &AppState,
@@ -1253,7 +1326,7 @@ fn sparklines(
     metric: Metric,
     level: &mut [i64],
     points: usize,
-) -> anyhow::Result<Vec<Vec<i64>>> {
+) -> anyhow::Result<(Vec<Vec<i64>>, Vec<i64>, i64)> {
     let store = s.read();
 
     let mut band_of: std::collections::HashMap<PathId, usize> = Default::default();
@@ -1261,27 +1334,11 @@ fn sparklines(
         band_of.insert(snap.ids[k as usize], bi);
     }
 
-    // Parent links covering everything alive at any point in the window.
-    //
-    // The end-of-window snapshot is not enough: a directory deleted mid-window
-    // emits its large negative event and then vanishes from the tree, so its
-    // delta would be dropped and the child it belonged to would keep bytes
-    // that no longer exist.
-    let mut parent_of: std::collections::HashMap<PathId, Option<PathId>> = Default::default();
-    {
-        let mut ps = store.conn.prepare(
-            "SELECT path_id, parent_id FROM path
-             WHERE root_id = ?1 AND born_scan <= ?2
-               AND (died_scan IS NULL OR died_scan > ?3)",
-        )?;
-        let rows = ps.query_map([root, s2, s1], |r| {
-            Ok((r.get::<_, PathId>(0)?, r.get::<_, Option<PathId>>(1)?))
-        })?;
-        for row in rows {
-            let (id, par) = row?;
-            parent_of.insert(id, par);
-        }
-    }
+    // Climbing from each event's path, rather than pre-loading the whole
+    // dictionary. A directory deleted mid-window still has to resolve — it
+    // emits a large negative event and then vanishes from the tree — and
+    // `Ancestry` does not filter on liveness for exactly that reason.
+    let mut ancestry = Ancestry::new(&store.conn);
     let node_id = snap.ids[node as usize];
 
     let mut st = store.conn.prepare(&format!(
@@ -1307,31 +1364,33 @@ fn sparklines(
             r.get::<_, i64>(3)?,
         ))
     })?;
+    // Totals across the whole window, per child, plus the viewed directory's
+    // own files. These turn "size now" into "size then" without reading the
+    // tree as it stood then.
+    let mut totals = vec![0i64; kids.len()];
+    let mut own_total = 0i64;
     for row in rows {
         let (sid, pid, db, dk) = row?;
         let d = if metric == Metric::Allocated { dk } else { db };
         if d == 0 {
             continue;
         }
-        // Climb until we land on one of the listed children.
-        let mut cur = pid;
-        let mut band = None;
-        loop {
-            if let Some(&b) = band_of.get(&cur) {
-                band = Some(b);
-                break;
-            }
-            if cur == node_id {
-                break; // the directory's own files, not any child
-            }
-            match parent_of.get(&cur) {
-                Some(Some(p)) => cur = *p,
-                _ => break,
-            }
+        // An event on the directory itself moves its own files, not any
+        // child's, and must not be attributed to one.
+        if pid == node_id {
+            own_total += d;
+            continue;
         }
-        if let Some(b) = band {
+        // Climb until we land on one of the listed children.
+        if let Climb::Band(b) = ancestry.band(&band_of, node_id, pid)? {
+            totals[b] += d;
             by_scan.entry(sid).or_default().push((b, d));
         }
+    }
+
+    // Wind each child back to where it stood when the window opened.
+    for (i, l) in level.iter_mut().enumerate() {
+        *l -= totals[i];
     }
 
     let n = scan_ids.len().max(1);
@@ -1354,5 +1413,11 @@ fn sparklines(
             }
         }
     }
-    Ok(out)
+    Ok((out, totals, own_total))
+}
+
+/// What the snapshot cache is holding. Unauthenticated: it is a memory
+/// figure, not data about anyone's files.
+async fn cache_status(State(s): State<Arc<AppState>>) -> ApiResult {
+    blocking(move || Ok(s.cache_stats())).await
 }

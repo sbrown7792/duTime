@@ -22,10 +22,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// How many materialized snapshots to keep. Each is roughly 10 MB for a
-/// 127k-entity tree, so this is a bounded tens-of-MB cache in exchange for
-/// making the time slider feel instant while scrubbing.
+/// How many materialized snapshots to keep, and how much memory they may
+/// take between them.
+///
+/// The byte budget is the real bound; the count is a secondary cap so a
+/// pathologically small root cannot fill the cache with hundreds of entries.
+/// Counting alone is not enough — a snapshot of a 127k-entity tree is about
+/// 25 MB and one of a 2.3M-entity volume approaches a gigabyte, so "keep
+/// eight" is a modest cache on one machine and an OOM kill on another. The
+/// shipped unit sets MemoryMax=1G, and the walker needs room of its own.
 const MAX_CACHED_SNAPSHOTS: usize = 8;
+const SNAPSHOT_CACHE_BYTES: usize = 192 << 20;
 
 /// Read connections. Enough for the handful of parallel requests a dashboard
 /// makes, few enough that a burst cannot exhaust the blocking pool.
@@ -90,6 +97,7 @@ struct Cache {
     map: HashMap<(RootId, ScanId), Arc<Snapshot>>,
     /// Insertion order, oldest first.
     order: Vec<(RootId, ScanId)>,
+    bytes: usize,
 }
 
 impl AppState {
@@ -149,12 +157,21 @@ impl AppState {
             Arc::new(Snapshot::load(&r, root, scan)?)
         };
 
+        let size = built.approx_bytes();
         let mut c = self.cache.lock().unwrap();
         if c.map.insert((root, scan), built.clone()).is_none() {
             c.order.push((root, scan));
-            while c.order.len() > MAX_CACHED_SNAPSHOTS {
+            c.bytes += size;
+            // Always keep the one just built, however large: evicting it
+            // would mean rebuilding it for the very next request, and on a
+            // tree this big that is seconds, not milliseconds.
+            while c.order.len() > 1
+                && (c.order.len() > MAX_CACHED_SNAPSHOTS || c.bytes > SNAPSHOT_CACHE_BYTES)
+            {
                 let victim = c.order.remove(0);
-                c.map.remove(&victim);
+                if let Some(old) = c.map.remove(&victim) {
+                    c.bytes = c.bytes.saturating_sub(old.approx_bytes());
+                }
             }
         }
         Ok(built)
@@ -197,5 +214,19 @@ impl AppState {
 
     pub fn has_protected_roots(&self) -> bool {
         !self.protected.is_empty()
+    }
+}
+
+impl AppState {
+    /// Snapshot cache occupancy, for diagnostics and for the tests that keep
+    /// the budget honest.
+    pub fn cache_stats(&self) -> serde_json::Value {
+        let c = self.cache.lock().unwrap();
+        serde_json::json!({
+            "snapshots": c.order.len(),
+            "bytes": c.bytes,
+            "budget_bytes": SNAPSHOT_CACHE_BYTES,
+            "max_snapshots": MAX_CACHED_SNAPSHOTS,
+        })
     }
 }

@@ -436,3 +436,47 @@ async fn listing_reports_a_parent_to_navigate_back_to() {
     // only in its tooltip.
     assert!(l["parent"]["size"].as_i64().unwrap() >= 8 << 20);
 }
+
+/// The snapshot cache must be bounded by memory, not by a count.
+///
+/// A count is the wrong unit: a snapshot of a 100k-entity root costs tens of
+/// megabytes and one of a 2.3M-entity volume costs hundreds, so "keep eight"
+/// is a modest cache on one machine and an OOM kill on another. Measured on a
+/// 1.3M-entity fixture, holding eight would have needed some 1.8 GB against a
+/// unit that caps the service at 1 GB.
+#[tokio::test]
+async fn the_snapshot_cache_is_bounded_and_reports_itself() {
+    let mut f = Fixture::new();
+    f.write("a/big.bin", 5 << 20);
+    f.snapshot();
+    for i in 0..6 {
+        f.write(&format!("a/f{i}.bin"), (2 << 20) + i);
+        f.snapshot();
+    }
+    let (state, root) = f.finish();
+
+    // Visit every scan, which is what dragging the time slider does.
+    let scans = get(&state, "/api/v1/scans").await;
+    let ids: Vec<i64> =
+        scans["scans"].as_array().unwrap().iter().map(|s| s["scan_id"].as_i64().unwrap()).collect();
+    assert!(ids.len() >= 6, "fixture did not produce enough scans");
+    for id in &ids {
+        get(&state, &format!("/api/v1/tree?path={}&at=scan:{id}", enc(&root))).await;
+    }
+
+    let c = get(&state, "/api/v1/cache").await;
+    let n = c["snapshots"].as_u64().unwrap();
+    let bytes = c["bytes"].as_u64().unwrap();
+    let budget = c["budget_bytes"].as_u64().unwrap();
+    let max = c["max_snapshots"].as_u64().unwrap();
+
+    assert!(n >= 1, "the cache emptied itself: {c}");
+    assert!(n <= max, "count cap ignored: {c}");
+    // One snapshot may exceed the budget on its own — evicting the one just
+    // built would mean rebuilding it for the next request — but two must not.
+    assert!(
+        n == 1 || bytes <= budget,
+        "cache is over budget with {n} snapshots: {c}"
+    );
+    assert!(bytes > 0, "a cached snapshot reported zero size: {c}");
+}

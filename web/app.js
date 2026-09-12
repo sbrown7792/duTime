@@ -35,6 +35,69 @@ const state = {
 
 const charts = {};
 
+// ── busy state ─────────────────────────────────────────────────────────
+
+/* A root change on a large tree takes a second or more — the snapshot has to
+ * be built before anything can be drawn — and until it lands the screen still
+ * shows the *previous* root. That is worse than showing nothing: it is not
+ * stale, it is another directory's numbers under the new root's name.
+ *
+ * So two signals. A progress bar says work is happening, and the content is
+ * dimmed and made inert to say that what you are looking at is not the answer
+ * yet. Both are bracketed around whole operations rather than individual
+ * requests: the Explorer fires four in sequence, and a per-request indicator
+ * would blink off between each one.
+ */
+let busyDepth = 0;
+let busyTimer = null;
+
+/** Blank every pane that is about to be answered for a different root. */
+function clearPanes(msg) {
+  const note = `<div class="empty">${escapeHtml(msg)}</div>`;
+  for (const sel of ['#listing', '#seriesTable', '#gainTable', '#changesTable']) {
+    const el = $(sel);
+    if (el) el.innerHTML = note;
+  }
+  for (const c of Object.values(charts)) c.clear();
+  $('#crumbs').innerHTML = '';
+  $('#listSub').textContent = '';
+}
+
+/** Wrap an operation so the UI reflects that it is running. */
+async function busy(fn) {
+  // Held back briefly: a warm switch finishes in ~20ms, and a spinner that
+  // appears and vanishes inside a single frame reads as a glitch, not as
+  // progress. If the work beats the timer, nothing is ever shown.
+  if (++busyDepth === 1) {
+    busyTimer = setTimeout(() => {
+      document.body.classList.add('loading');
+      $('#main').setAttribute('aria-busy', 'true');
+    }, 150);
+  }
+  try {
+    return await fn();
+  } finally {
+    if (--busyDepth <= 0) {
+      busyDepth = 0;
+      clearTimeout(busyTimer);
+      document.body.classList.remove('loading');
+      $('#main').removeAttribute('aria-busy');
+    }
+  }
+}
+
+/* Which load is current.
+ *
+ * Switching root twice in quick succession leaves two sets of requests in
+ * flight, and nothing guarantees they come back in order — the first root's
+ * slower reply can land last and paint itself over the root you actually
+ * chose, with the picker still naming the other one. Every loader takes a
+ * ticket on entry and drops its result if the ticket is no longer current.
+ */
+let loadGen = 0;
+const newLoad = () => ++loadGen;
+const isCurrent = (gen) => gen === loadGen;
+
 // ── helpers ────────────────────────────────────────────────────────────
 
 function cssVar(name) {
@@ -292,7 +355,9 @@ function seriesColors() {
 // ── overview ───────────────────────────────────────────────────────────
 
 async function loadOverview() {
+  const gen = loadGen;
   const o = await api('overview');
+  if (!isCurrent(gen)) return;
   state.rootPath = o.path.name;
 
   const used = o.history.length ? o.history[o.history.length - 1][1] : 0;
@@ -386,10 +451,12 @@ function forecastTile(f) {
 // ── gainers table ──────────────────────────────────────────────────────
 
 async function loadGainers(sel, limit) {
+  const gen = loadGen;
   const g = await api('gainers', {
     from: state.window, mode: state.mode,
     limit, losers: state.dir === 'losers', collapse: state.collapse,
   });
+  if (!isCurrent(gen)) return;
   state.lastChanges = g.results;
 
   const el = $(sel);
@@ -466,10 +533,14 @@ function depthColors() {
 }
 
 async function loadTreemap() {
+  const gen = loadGen;
   const s = currentScan();
   const t = await api('tree', {
     path: state.path, at: s ? `scan:${s.scan_id}` : 'now', depth: 4, limit: 300,
   });
+  // Superseded while in flight: this tree belongs to the root the user has
+  // already moved off, and drawing it would contradict the picker.
+  if (!isCurrent(gen)) return;
   state.path = t.path.name;
   renderCrumbs();
 
@@ -571,14 +642,17 @@ function renderCrumbs() {
 }
 
 async function loadSeries() {
+  const gen = loadGen;
   let s;
   try {
     s = await api('series', { path: state.path, from: state.window, children: 8 });
   } catch (e) {
+    if (!isCurrent(gen)) return;
     chart('seriesChart').clear();
     $('#seriesTable').innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
     return;
   }
+  if (!isCurrent(gen)) return;
   $('#seriesTitle').textContent = `Composition of ${s.path.name}`;
 
   const colors = seriesColors();
@@ -710,13 +784,18 @@ function sparkSvg(vals, swing = null, w = 132, h = 24) {
 const KIND_ICON = { dir: '\u{1F4C1}', file: '\u{1F4C4}', symlink: '\u{21B3}', other: '\u{2022}' };
 
 async function loadListing() {
+  const gen = loadGen;
   let d;
   try {
     d = await api('listing', { path: state.path, from: state.window, points: 40, limit: 400 });
   } catch (e) {
+    if (!isCurrent(gen)) return;
     $('#listing').innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
     return;
   }
+  // Superseded while in flight: this is another root's directory listing and
+  // must not be painted under the new root's name.
+  if (!isCurrent(gen)) return;
 
   const rows = d.rows.slice();
   const key = state.listSort;
@@ -776,7 +855,7 @@ async function loadListing() {
   // parent's numbers go in the tooltip, where they inform without competing.
   const up = d.parent
     ? `<tr class="updir clickable" data-path="${escapeHtml(d.parent.path.name)}" tabindex="0"
-           title="Up to ${escapeHtml(d.parent.path.name)} \u2014 ${fmtSize(d.parent.size)}${d.parent.delta ? `, ${fmtDelta(d.parent.delta)}` : ''}">
+           title="Up to ${escapeHtml(d.parent.path.name)} \u2014 ${fmtSize(d.parent.size)}">
          <td class="name">
            <span class="ico">\u{21B0}</span>..<span class="upname">${escapeHtml(d.parent.name)}</span>
          </td>
@@ -862,12 +941,14 @@ function divergingColor(delta, before) {
 }
 
 async function loadDiff() {
+  const gen = loadGen;
   const from = $('#diffFrom').value, to = $('#diffTo').value;
   if (!from || !to) return;
   let d;
   try {
     d = await api('diff', { from: `scan:${from}`, to: `scan:${to}`, depth: 4, limit: 300 });
-  } catch (e) { toast(e.message); return; }
+  } catch (e) { if (isCurrent(gen)) toast(e.message); return; }
+  if (!isCurrent(gen)) return;
 
   const paint = (n) => {
     const o = {
@@ -921,6 +1002,8 @@ async function loadDiff() {
 // ── wiring ─────────────────────────────────────────────────────────────
 
 async function refresh() {
+  newLoad();
+  return busy(async () => {
   try {
     if (state.view === 'overview') await loadOverview();
     else if (state.view === 'explorer') { await loadTreemap(); await loadListing(); await loadSeries(); }
@@ -931,6 +1014,7 @@ async function refresh() {
     if (e.needsAuth) openSignIn(e.message);
     else toast(e.message);
   }
+  });
 }
 
 /** Encode the current view in the URL so it can be shared or reloaded.
@@ -1043,10 +1127,21 @@ async function init() {
 
   $('#window').addEventListener('change', (e) => { state.window = e.target.value; refresh(); });
   $('#root').addEventListener('change', async (e) => {
+    const name = e.target.selectedOptions[0]?.textContent || 'root';
     state.root = Number(e.target.value);
     state.path = null;
-    await loadScans();
-    refresh();
+    // Clear, don't dim. Every pane below is showing another root's contents,
+    // and a dimmed list of the wrong filenames still reads as a list of
+    // filenames — the Explorer's panes finish at different times, so the
+    // listing would otherwise sit there naming the previous root for however
+    // long its own request takes.
+    clearPanes(`Loading ${name}…`);
+    $('#busyMsg').textContent = `Loading ${name}…`;
+    await busy(async () => {
+      await loadScans();
+      await refresh();
+    });
+    $('#busyMsg').textContent = `${name} loaded.`;
   });
 
   $('#timeSlider').addEventListener('input', (e) => {
@@ -1084,6 +1179,8 @@ async function init() {
  * rather than left pointing at a root that is no longer visible.
  */
 async function boot() {
+  return busy(async () => {
+  newLoad();
   try {
     const r = await api('roots');
     if (!r.roots.length) {
@@ -1124,6 +1221,7 @@ async function boot() {
   } catch (e) {
     toast(e.message);
   }
+  });
 }
 
 init();

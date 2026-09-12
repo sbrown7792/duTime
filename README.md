@@ -428,6 +428,37 @@ Requests logged but never answered is a different bug from no requests at all,
 and that distinction is usually the whole diagnosis. (`access_log = true` in
 the config does the same thing.)
 
+### A very large root is slow to open
+
+Scale is entity count, not disk size. Measured on a synthetic 1.3M-entity
+volume (`cargo run --release --example bench_large`), opening the Explorer
+after a root change:
+
+| | before | after |
+|---|---|---|
+| treemap | 2.0 s | 2.0 s cold, 0.06 s warm |
+| **Contents** | **2.3 s** | **0.014 s** |
+| **stacked area** | **2.8 s** | **0.014 s** |
+
+The Contents pane was materialising the whole tree a *second* time just to
+learn each child's size at the start of the window; it now derives that from
+the size at the end minus the window's own events, which is the invariant the
+store is built on. The stacked area was reconstructing each band's starting
+total with a recursive walk of every descendant — a million rows, nine times
+per request — and does the same thing now instead. Both also built a
+`path_id -> parent_id` map of the entire root on every request; they climb
+from the few hundred events in the window instead.
+
+What remains is the treemap's 2 s, and that one is real: a treemap has to lay
+out the whole tree, so the whole tree has to be resident. It is paid once per
+root and cached after.
+
+**Memory scales with entities** — roughly 180 bytes each plus allocator
+overhead, so ~250 MB for 500k and ~1 GB for 2.3M. The snapshot cache is
+bounded in bytes rather than in snapshots for that reason, and the system unit
+allows 2 GB. `dutime doctor` reports the entity count if you want to size it
+down.
+
 ### A scan is running and the UI feels slow
 
 It should not block. The walk and the commit both run off the request threads,

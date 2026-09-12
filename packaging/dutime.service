@@ -69,8 +69,18 @@ CPUWeight=20
 CPUQuota=200%
 IOSchedulingClass=idle
 IOWeight=10
-MemoryHigh=512M
-MemoryMax=1G
+# Scales with the number of tracked entities, not with disk size. The
+# treemap needs the whole tree resident to lay out, which costs roughly
+# 180 bytes per entity plus allocator overhead: ~250M for a 500k-entity
+# host, ~1G for a 2.3M-entity one such as a Nextcloud volume. duTime bounds
+# its own snapshot cache, but a single snapshot of a very large root is
+# irreducible while it is being drawn.
+#
+# Being OOM-killed mid-scan is worse than using the memory, so these are set
+# for a large host. Lower them if yours is small; `dutime doctor` reports the
+# entity count to size them by.
+MemoryHigh=1G
+MemoryMax=2G
 TasksMax=64
 
 [Install]

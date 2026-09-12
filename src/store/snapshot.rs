@@ -262,3 +262,48 @@ impl Snapshot {
         out
     }
 }
+
+impl Snapshot {
+    /// Roughly how much heap this snapshot occupies.
+    ///
+    /// The cache is bounded in bytes rather than in snapshots because the two
+    /// are not related: a 100k-entity root costs about 25 MB and a 2.3M-entity
+    /// one nearly a gigabyte, so "keep eight" means a comfortable cache on one
+    /// machine and an OOM kill on another — and the shipped unit sets
+    /// MemoryMax=1G.
+    ///
+    /// Counted from the actual allocations rather than a per-entity guess:
+    /// the variable parts are the names and the per-node child lists, and
+    /// those are exactly what differ between a wide tree and a deep one.
+    pub fn approx_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let n = self.ids.len();
+        let fixed = n
+            * (size_of::<PathId>()          // ids
+                + size_of::<u32>() * 2      // parent, depth
+                + size_of::<Kind>()
+                + size_of::<OsString>()     // the String header; bytes added below
+                + size_of::<Vec<u32>>()     // the children header, likewise
+                + size_of::<i64>() * 7);    // own_* and incl_*
+
+        // Per-allocation overhead, not just payload. `children` is a vector
+        // of vectors, so a 1.3M-entity tree makes 1.3M separate small
+        // allocations, each of which costs the allocator a header and rounds
+        // up to a size class. Ignoring that undercounted the cache by
+        // hundreds of megabytes, which is how a "384 MB" budget produced a
+        // resident gigabyte.
+        const ALLOC_OVERHEAD: usize = 32;
+        let names: usize =
+            self.name.iter().map(|s| if s.is_empty() { 0 } else { s.len() + ALLOC_OVERHEAD }).sum();
+        let kids: usize = self
+            .children
+            .iter()
+            .map(|c| {
+                if c.is_empty() { 0 } else { c.capacity() * size_of::<u32>() + ALLOC_OVERHEAD }
+            })
+            .sum();
+        // A HashMap keeps roughly 1/0.875 slots per entry, each an (id, idx).
+        let index = (n * (size_of::<PathId>() + size_of::<u32>()) * 8) / 7;
+        fixed + names + kids + index
+    }
+}

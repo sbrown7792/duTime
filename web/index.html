@@ -37,6 +37,10 @@
   </div>
 </header>
 
+<!-- Indeterminate, because the work is a database read whose duration is not
+     knowable in advance; a fake percentage would be a lie told smoothly. -->
+<div id="progress" role="presentation"><div class="bar"></div></div>
+
 <nav class="tabs" role="tablist">
   <button role="tab" data-view="overview" class="on">Overview</button>
   <button role="tab" data-view="explorer">Explorer</button>
@@ -44,7 +48,9 @@
   <button role="tab" data-view="compare">Compare</button>
 </nav>
 
-<main>
+<p id="busyMsg" class="sr-only" role="status" aria-live="polite"></p>
+
+<main id="main">
   <!-- ───────────────────────── Overview ───────────────────────── -->
   <section id="view-overview" class="view on">
     <div id="scanWarn"></div>
