@@ -11,6 +11,30 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.4.0 — 2026-09-13
+
+### Fixed
+
+- **The Contents listing hid the directory you were looking for.** It can only
+  show so many entries, and it chose them by size. In a directory of
+  thousands that hid exactly the wrong thing: a small folder that doubled sat
+  below every large folder that did nothing, fell outside the limit, and was
+  reported only as part of a count of entries "not shown".
+
+  Entries are now chosen by what moved — anything with a change over the
+  window is kept first, largest change first, and the remaining slots go to
+  the largest static entries. Size still decides the order among things that
+  did not move, and the browser still sorts the displayed table however you
+  ask; this only decides who makes the cut.
+
+  Doing that required measuring every child before dropping any, so the window
+  deltas are computed for the whole directory and the selection happens
+  afterwards. Measured no slower on a 1.3M-entity volume.
+
+- The "not shown" note now says whether the hidden entries changed. Normally
+  none did — the movers are taken first — and "1,204 unchanged entries not
+  shown" is a much more useful thing to be told than "1,204 smaller entries".
+
 ## 0.3.1 — 2026-09-12
 
 - The status line links to the repository. The URL comes from `Cargo.toml`, so

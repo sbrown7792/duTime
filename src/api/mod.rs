@@ -1303,16 +1303,39 @@ async fn listing(
             }
         };
 
-        let mut kids: Vec<u32> = snap.children[node as usize].clone();
-        kids.sort_by_key(|&c| std::cmp::Reverse(size_of(&snap, c)));
-        kids.truncate(limit);
+        // Every child, measured before any is dropped.
+        let all: Vec<u32> = snap.children[node as usize].clone();
+        let w = window_deltas(&s, root, &snap, node, &all, s1, s2, metric)?;
 
-        // Seeded with the size *now*; `sparklines` winds each one back to the
-        // start of the window using the events it reads anyway.
+        // Rank by what moved, then by what is big.
+        //
+        // Ranking by size alone is what this replaces, and it had a bad
+        // failure: in a directory of thousands, a small folder that doubled
+        // sat below a thousand large ones that did nothing, fell outside the
+        // limit, and vanished into the "not shown" count — so the one entry
+        // worth seeing was the one you could not see. Size still decides the
+        // order among things that did not move, and still decides the display
+        // order in the browser; this only decides who makes the cut.
+        let mut order: Vec<usize> = (0..all.len()).collect();
+        order.sort_by(|&a, &b| {
+            (w.totals[b] != 0)
+                .cmp(&(w.totals[a] != 0))
+                .then_with(|| w.totals[b].abs().cmp(&w.totals[a].abs()))
+                .then_with(|| size_of(&snap, all[b]).cmp(&size_of(&snap, all[a])))
+        });
+        let (pick, rest) = order.split_at(order.len().min(limit));
+        // How many of the omitted actually changed. Normally zero — the
+        // movers are taken first — and when it is zero the UI can say the
+        // hidden entries are unchanged rather than merely smaller.
+        let omitted_changed = rest.iter().filter(|&&i| w.totals[i] != 0).count();
+
+        let kids: Vec<u32> = pick.iter().map(|&i| all[i]).collect();
+        // Seeded with the size *now*; `series_for` winds each back to the
+        // start of the window using the deltas already computed.
         let mut level: Vec<i64> = kids.iter().map(|&c| size_of(&snap, c)).collect();
-
-        let (spark, totals, own_total) =
-            sparklines(&s, root, &snap, node, &kids, s1, s2, metric, &mut level, points)?;
+        let spark = series_for(pick, &w, &mut level, points);
+        let totals: Vec<i64> = pick.iter().map(|&i| w.totals[i]).collect();
+        let own_total = w.own_total;
 
         // The row that walks back up. Resolved here rather than by trimming
         // the displayed path in the browser: a path component that is not
@@ -1370,7 +1393,10 @@ async fn listing(
             "to": { "scan_id": s2, "at": at2 },
             "window_clamped_to_first_scan": clamped,
             "parent": parent,
-            "truncated": snap.children[node as usize].len().saturating_sub(kids.len()),
+            "truncated": rest.len(),
+            // Zero means every hidden entry is unchanged, which is a much
+            // more reassuring thing to be told than "some were hidden".
+            "truncated_changed": omitted_changed,
             "own": {
                 "size": own_now,
                 "delta": own_now - own_then,
@@ -1394,8 +1420,29 @@ async fn listing(
 /// total it, one to replay them in order. Events number in the hundreds even
 /// on a large volume — the storage is change-only — so the second pass costs
 /// nothing next to materialising a whole tree.
+/// What the window did to every child of a directory.
+///
+/// Computed for *all* children, before any of them are dropped from the
+/// listing. Selecting first and measuring afterwards is what made a small
+/// directory that doubled invisible behind a thousand large ones that did
+/// nothing.
+pub struct WindowDeltas {
+    /// Total change over the window, indexed as `kids` was passed in.
+    totals: Vec<i64>,
+    /// Per scan, one entry per event that landed under a child.
+    ///
+    /// Appended rather than summed per (scan, child): a hash lookup per event
+    /// measured a full second slower on a window holding 1.3M of them, and
+    /// the list is walked exactly once afterwards.
+    by_scan: std::collections::HashMap<ScanId, Vec<(u32, i64)>>,
+    /// Change to the directory's own files, which belong to no child.
+    own_total: i64,
+    /// Every scan in the window, in order — the sparkline's x positions.
+    scan_ids: Vec<ScanId>,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn sparklines(
+fn window_deltas(
     s: &AppState,
     root: RootId,
     snap: &Snapshot,
@@ -1404,9 +1451,7 @@ fn sparklines(
     s1: ScanId,
     s2: ScanId,
     metric: Metric,
-    level: &mut [i64],
-    points: usize,
-) -> anyhow::Result<(Vec<Vec<i64>>, Vec<i64>, i64)> {
+) -> anyhow::Result<WindowDeltas> {
     let store = s.read();
 
     // One downward pass over the subtree, after which resolving an event is
@@ -1442,7 +1487,7 @@ fn sparklines(
          FROM size_event e JOIN path p ON p.path_id = e.path_id
          WHERE p.root_id = ?1 AND e.scan_id > ?2 AND e.scan_id <= ?3",
     )?;
-    let mut by_scan: std::collections::HashMap<ScanId, Vec<(usize, i64)>> = Default::default();
+    let mut by_scan: std::collections::HashMap<ScanId, Vec<(u32, i64)>> = Default::default();
     let rows = ev.query_map([root, s1, s2], |r| {
         Ok((
             r.get::<_, ScanId>(0)?,
@@ -1481,35 +1526,60 @@ fn sparklines(
             },
         };
         totals[band] += d;
-        by_scan.entry(sid).or_default().push((band, d));
+        by_scan.entry(sid).or_default().push((band as u32, d));
     }
 
-    // Wind each child back to where it stood when the window opened.
-    for (i, l) in level.iter_mut().enumerate() {
-        *l -= totals[i];
+    Ok(WindowDeltas { totals, by_scan, own_total, scan_ids })
+}
+
+/// Downsampled value series for a chosen subset of the children.
+///
+/// `pick` names which entries of the original `kids` to plot; `level` arrives
+/// holding each of those at its size *now* and is wound back to the start of
+/// the window before the replay.
+fn series_for(
+    pick: &[usize],
+    w: &WindowDeltas,
+    level: &mut [i64],
+    points: usize,
+) -> Vec<Vec<i64>> {
+    // Original child index -> position among the picked ones, as a lookup
+    // table rather than a map: this is consulted once per event, and a window
+    // containing a baseline scan holds one event per entity.
+    const UNPICKED: u32 = u32::MAX;
+    let n_children = w.totals.len();
+    let mut pos = vec![UNPICKED; n_children];
+    for (p, &i) in pick.iter().enumerate() {
+        pos[i] = p as u32;
+    }
+    for (p, &i) in pick.iter().enumerate() {
+        level[p] -= w.totals[i];
     }
 
-    let n = scan_ids.len().max(1);
-    let mut out: Vec<Vec<i64>> = vec![Vec::with_capacity(points.min(n)); kids.len()];
+    let n = w.scan_ids.len().max(1);
+    let mut out: Vec<Vec<i64>> = vec![Vec::with_capacity(points.min(n)); pick.len()];
     let mut last_bucket = usize::MAX;
-    for (i, sid) in scan_ids.iter().enumerate() {
-        if let Some(deltas) = by_scan.get(sid) {
+    for (i, sid) in w.scan_ids.iter().enumerate() {
+        if let Some(deltas) = w.by_scan.get(sid) {
             for &(b, d) in deltas {
-                level[b] += d;
+                let p = pos[b as usize];
+                if p != UNPICKED {
+                    level[p as usize] += d;
+                }
             }
         }
         // Record once per bucket, plus always the final sample so the
         // sparkline's right-hand end is the current value rather than
         // whatever the last bucket boundary happened to be.
         let bucket = i * points / n;
-        if bucket != last_bucket || i + 1 == scan_ids.len() {
+        if bucket != last_bucket || i + 1 == w.scan_ids.len() {
             last_bucket = bucket;
             for (b, o) in out.iter_mut().enumerate() {
                 o.push(level[b]);
             }
         }
     }
-    Ok((out, totals, own_total))
+    out
 }
 
 /// What the snapshot cache is holding. Unauthenticated: it is a memory

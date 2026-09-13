@@ -132,7 +132,10 @@ extrapolate from.
 
 **Explorer** — a sortable listing of everything in the current directory with
 a **trend sparkline beside each row**, so you can see which of thirty siblings
-is the one creeping up before deciding which to open. Then the same directory
+is the one creeping up before deciding which to open. A directory with more
+entries than the listing can show keeps **everything that changed** and fills
+the rest with the largest, because the entry worth seeing is rarely the
+biggest one. Then the same directory
 decomposed into its largest children as a stacked area. Then a WinDirStat-style
 treemap with a time slider; drag it and the same tree redraws as it stood at
 that moment. The slider applies to the treemap alone — the panes above it

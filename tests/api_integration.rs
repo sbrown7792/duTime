@@ -530,3 +530,93 @@ async fn health_reports_the_build_and_the_database_size() {
         "repository is not an absolute https URL: {h}"
     );
 }
+
+/// A directory that grew must be listed even when a thousand bigger ones did
+/// not.
+///
+/// The listing can only show so many entries, and it used to choose them by
+/// size. In a directory of thousands that hid exactly the wrong thing: a
+/// small folder that doubled sat below every large folder that did nothing,
+/// fell outside the limit, and was reported only as part of a count of
+/// entries "not shown".
+#[tokio::test]
+async fn a_grower_beats_big_static_neighbours_for_a_listing_slot() {
+    let mut f = Fixture::new();
+    // Sixty large directories that never change...
+    for i in 0..60 {
+        f.write(&format!("static{i:03}/bulk.bin"), 8 << 20);
+    }
+    // ...and one small one that does.
+    f.write("tiny/log.bin", 1 << 20);
+    f.snapshot();
+    f.write("tiny/log.bin", 6 << 20);
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    // Room for far fewer entries than there are directories.
+    let l = get(
+        &state,
+        &format!("/api/v1/listing?path={}&from=-7d&limit=5", enc(&root)),
+    )
+    .await;
+
+    let rows = l["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 5, "limit not honoured: {}", rows.len());
+    let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"tiny"), "the only directory that grew was dropped: {names:?}");
+
+    // It is picked for having moved, not for being big: every other entry
+    // shown is larger than it.
+    let tiny = rows.iter().find(|r| r["name"] == "tiny").unwrap();
+    assert!(tiny["delta"].as_i64().unwrap() > 0, "{tiny}");
+    assert!(
+        rows.iter().filter(|r| r["name"] != "tiny").all(|r| {
+            r["size"].as_i64().unwrap() > tiny["size"].as_i64().unwrap()
+        }),
+        "expected the rest of the slots to go to larger, static entries: {names:?}"
+    );
+
+    // And the hidden ones are reported as unchanged, which they are.
+    assert!(l["truncated"].as_u64().unwrap() >= 55, "{l}");
+    assert_eq!(
+        l["truncated_changed"], serde_json::json!(0),
+        "something that changed was hidden: {}", l["truncated_changed"]
+    );
+}
+
+/// Selecting by movement must not corrupt the figures it selects on.
+#[tokio::test]
+async fn a_truncated_listing_still_reports_each_row_correctly() {
+    let mut f = Fixture::new();
+    for i in 0..20 {
+        f.write(&format!("d{i:02}/f.bin"), (2 << 20) + (i << 10));
+    }
+    f.snapshot();
+    for i in 0..6 {
+        f.write(&format!("d{i:02}/f.bin"), (9 << 20) + (i << 10));
+    }
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d&limit=8", enc(&root))).await;
+
+    for r in l["rows"].as_array().unwrap() {
+        let spark = r["spark"].as_array().unwrap();
+        assert_eq!(
+            spark.last().unwrap().as_i64().unwrap(),
+            r["size"].as_i64().unwrap(),
+            "sparkline for {} does not end at its size", r["name"]
+        );
+        assert_eq!(
+            spark.first().unwrap().as_i64().unwrap(),
+            r["before"].as_i64().unwrap(),
+            "sparkline for {} does not start at its size then", r["name"]
+        );
+        assert_eq!(
+            r["delta"].as_i64().unwrap(),
+            r["size"].as_i64().unwrap() - r["before"].as_i64().unwrap()
+        );
+    }
+    // Every one that moved got a slot, so the rest are unchanged.
+    assert_eq!(l["truncated_changed"], serde_json::json!(0), "{l}");
+}

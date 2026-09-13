@@ -958,8 +958,16 @@ async function loadListing() {
        </tr>`
     : '';
 
+  // Say whether the hidden ones matter. The listing keeps everything that
+  // moved and fills the rest with the largest, so "unchanged" is usually the
+  // honest and reassuring word; when even that overflowed, say so plainly
+  // rather than implying nothing was missed.
   const more = d.truncated
-    ? `<div class="more">${d.truncated.toLocaleString()} smaller entries not shown</div>`
+    ? `<div class="more">${d.truncated.toLocaleString()} `
+      + (d.truncated_changed
+        ? `more entries not shown, ${d.truncated_changed.toLocaleString()} of which changed`
+        : 'unchanged entries not shown')
+      + '</div>'
     : '';
 
   $('#listing').innerHTML = rows.length || own || up
