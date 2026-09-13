@@ -301,6 +301,11 @@ async fn scans(
                 "fs_total": r.get::<_, Option<i64>>(8)?,
                 "fs_free": r.get::<_, Option<i64>>(9)?,
                 "fs_avail": r.get::<_, Option<i64>>(10)?,
+                // Fetched all along and then dropped: a scan that could not
+                // read part of the tree is exactly what you go to this
+                // endpoint to find out.
+                "status": r.get::<_, String>(11)?,
+                "err": r.get::<_, Option<String>>(12)?,
             }))
         })?;
         let mut v: Vec<Value> = rows.collect::<rusqlite::Result<_>>()?;

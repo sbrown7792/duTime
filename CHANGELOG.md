@@ -11,6 +11,19 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.4.1 — 2026-09-13
+
+- **An exclude pattern starting with `#` now excludes something.** Gitignore
+  syntax reads a leading `#` as a comment, so `exclude = ["#recycle/"]` parsed
+  as a comment and quietly excluded nothing — no error, and a scan that looked
+  fine while still walking the directory it had been told to skip. Synology
+  puts a `#recycle` at the top of every shared folder, so this is the first
+  thing a NAS owner tries. In a list where every entry *is* a pattern there is
+  no such thing as a comment. `!` still negates.
+- `/api/v1/scans` reports each scan's `status` and `err`. Both columns were
+  being read from the database and then discarded, which made the one endpoint
+  you would check for a failed scan the one that could not tell you about it.
+
 ## 0.4.0 — 2026-09-13
 
 ### Fixed

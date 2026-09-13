@@ -204,7 +204,9 @@ impl Config {
 
     /// A commented starter config.
     pub fn sample() -> String {
-        r#"# duTime configuration
+        // `r##` rather than `r#`: the sample mentions "#recycle/", and a
+        // `"#` inside would close a `r#"` string.
+        r##"# duTime configuration
 
 # Bind address. "127.0.0.1" is reachable only from this machine; use
 # "0.0.0.0" to serve the network.
@@ -254,6 +256,9 @@ one_filesystem = true
 track_file_min_bytes = 1048576
 # Relative to this root -- "/snap/" here would mean "/home/snap", not the
 # system /snap. Absolute paths belong in exclude_paths.
+#
+# Gitignore syntax: a bare pattern excludes, "!" re-includes. A leading "#"
+# is taken literally, so a Synology share's "#recycle/" works as written.
 exclude = ["**/.cache/thumbnails/", "**/node_modules/.cache/", "**/*.sock"]
 exclude_paths = ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap"]
 
@@ -271,7 +276,7 @@ exclude_paths = ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap"]
 # A big, slow, rarely-changing drive wants a coarser threshold: tracking every
 # 1 MiB file on a media volume is a lot of rows about things that never move.
 # track_file_min_bytes = 104857600
-"#
+"##
         .to_string()
     }
 }

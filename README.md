@@ -242,7 +242,8 @@ in question before turning the interval down.
 
 Exclusions use gitignore syntax, but duTime deliberately never reads
 `.gitignore` files off disk — `target/` and `node_modules/` are precisely what
-you are trying to find.
+you are trying to find. A leading `#` is taken literally rather than as a
+comment, so a Synology share's `#recycle/` excludes what it says it does.
 
 **Tracking several directories** means several `[[root]]` blocks. The name in
 brackets is a fixed field name, not a label you choose, so `[[media]]` is

@@ -206,10 +206,32 @@ struct WalkOutput {
 fn build_matcher(root: &Path, patterns: &[String]) -> anyhow::Result<Gitignore> {
     let mut b = GitignoreBuilder::new(root);
     for p in patterns {
-        b.add_line(None, p)
+        let line = escape_leading_hash(p);
+        b.add_line(None, &line)
             .map_err(|e| anyhow::anyhow!("bad exclude pattern {p:?}: {e}"))?;
     }
     Ok(b.build()?)
+}
+
+/// Let a pattern start with `#`.
+///
+/// In a `.gitignore` file a leading `#` marks a comment, and the borrowed
+/// syntax brings that with it — so `exclude = ["#recycle/"]` parses as a
+/// comment and silently excludes nothing. Synology shares carry a `#recycle`
+/// directory at the top of every one of them, so this is not a corner case;
+/// it is the first thing anyone with a NAS tries to exclude.
+///
+/// The escape is `\#`, which nobody should have to know. In a list where
+/// every entry *is* a pattern there is no such thing as a comment, so a
+/// leading `#` can only have been meant literally.
+///
+/// `!` is left alone: it means negation, it is documented, and unlike a
+/// comment it does something.
+fn escape_leading_hash(pattern: &str) -> String {
+    match pattern.strip_prefix('#') {
+        Some(rest) => format!("\\#{rest}"),
+        None => pattern.to_string(),
+    }
 }
 
 fn walk(
@@ -505,5 +527,53 @@ mod crossing_tests {
         // And it did actually walk the tree, so the assertion above is not
         // passing merely because nothing happened.
         assert!(r.tree.len() >= 4, "only found {} entities", r.tree.len());
+    }
+}
+
+#[cfg(test)]
+mod exclude_tests {
+    use super::*;
+
+    /// A pattern beginning with `#` must exclude something.
+    ///
+    /// Gitignore syntax reads a leading `#` as a comment, so
+    /// `exclude = ["#recycle/"]` used to parse as a comment and quietly
+    /// exclude nothing — with no error, and a scan that looked fine while
+    /// still walking the directory you had asked it to skip. Synology puts a
+    /// `#recycle` at the top of every shared folder, so this is the first
+    /// thing a NAS owner tries.
+    #[test]
+    fn a_pattern_starting_with_hash_is_a_pattern_not_a_comment() {
+        let dir = tempfile::Builder::new().prefix("dutime-hash-").tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for d in ["#recycle", "keep"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("f.bin"), vec![b'x'; 2 << 20]).unwrap();
+        }
+
+        let total = |patterns: &[&str]| {
+            let mut o = ScanOptions::new(&root);
+            o.threads = 2;
+            o.exclude = patterns.iter().map(|s| s.to_string()).collect();
+            let r = scan(&o).unwrap();
+            r.tree.rollup().bytes[0]
+        };
+
+        let all = total(&[]);
+        let excluded = total(&["#recycle/"]);
+        assert!(excluded < all, "a leading-# pattern excluded nothing: {excluded} vs {all}");
+        // And it excluded the right one.
+        assert_eq!(excluded, total(&["\\#recycle/"]), "differs from the escaped form");
+        assert_eq!(all, total(&["keep/"]) + excluded - total(&["#recycle/", "keep/"]));
+    }
+
+    /// `!` means negation and has to keep meaning it.
+    #[test]
+    fn negation_is_left_alone() {
+        assert_eq!(escape_leading_hash("!keep/"), "!keep/");
+        assert_eq!(escape_leading_hash("**/*.sock"), "**/*.sock");
+        assert_eq!(escape_leading_hash("#recycle/"), "\\#recycle/");
+        // Only the leading one; a `#` inside a name is not special anyway.
+        assert_eq!(escape_leading_hash("a#b"), "a#b");
     }
 }
