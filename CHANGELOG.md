@@ -11,6 +11,20 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.4.2 — 2026-09-15
+
+- **The Overview's window control now moves the chart.** It only ever moved
+  the gainers table; the graph above was built from the entire recorded
+  history regardless, so picking "Last hour" left two cards on one page
+  disagreeing about what the window meant.
+- The projection deliberately does *not* follow it. It is fitted to every
+  sample there is, because days-to-full is a property of the disk and should
+  not swing with the control you are using to look at it.
+- The tracked-size tile is now stated by the server rather than read off the
+  end of the chart's series, which a narrow window can empty. The chart's
+  caption counts what is plotted, and says how many samples exist in total
+  when those differ.
+
 ## 0.4.1 — 2026-09-13
 
 - **An exclude pattern starting with `#` now excludes something.** Gitignore

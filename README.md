@@ -128,7 +128,9 @@ once for every directory above it.
 
 **Overview** — capacity, the tracked tree over time, biggest gainers, and a
 days-to-full projection that refuses to guess until it has a real window to
-extrapolate from.
+extrapolate from. The window control moves the chart and the gainers table
+together; the projection ignores it, being fitted to every sample there is
+rather than to whichever span you are looking at.
 
 **Explorer** — a sortable listing of everything in the current directory with
 a **trend sparkline beside each row**, so you can see which of thirty siblings
@@ -499,4 +501,4 @@ aggregation.
 
 ## License
 
-MIT
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — free for personal, hobby, and nonprofit/educational use; commercial use requires a separate license from the author.

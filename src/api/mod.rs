@@ -133,6 +133,10 @@ pub struct Common {
     pub at: Option<String>,
     #[serde(default)]
     pub metric: Option<String>,
+    /// Start of the window the page is showing. Optional; without it the
+    /// whole recorded history is returned.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 fn metric_of(s: &Option<String>) -> Metric {
@@ -339,7 +343,7 @@ async fn overview(
         let metric = metric_of(&q.metric);
         let (scan_id, at) = s.pick_scan(root, &q.at)?;
 
-        let (path, first, total_scans, fs, partial, fstype, history) = {
+        let (path, first, total_scans, fs, tracked, partial, fstype, history) = {
             let store = s.read();
             let path = store.root_path(root)?;
             let first = store.first_scan(root)?;
@@ -348,6 +352,15 @@ async fn overview(
                 "SELECT fs_total, fs_free, fs_avail FROM scan WHERE scan_id = ?1",
                 [scan_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            // Stated outright rather than left to be read off the end of the
+            // chart's series: the chart is now cut to the window, and a
+            // window narrow enough to contain no scan would otherwise make
+            // the tracked-size tile read zero.
+            let tracked: (i64, i64) = store.conn.query_row(
+                "SELECT incl_bytes, incl_blocks FROM scan WHERE scan_id = ?1",
+                [scan_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             // A scan that could not read everything reports a total that is
             // too low. That has to reach the screen: the whole point of this
@@ -367,6 +380,11 @@ async fn overview(
                 "SELECT started_at, incl_bytes, incl_blocks, fs_free FROM scan
                  WHERE root_id = ?1 AND {USABLE_SCAN} ORDER BY scan_id"
             ))?;
+            // The whole history is read, and the chart is cut to the window
+            // afterwards, because the forecast below wants every sample it
+            // can get. Narrowing a Theil-Sen fit to the hour someone happens
+            // to be looking at would make the projection swing with the view
+            // control, which is not a property of the disk.
             let rows = st.query_map([root], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -376,10 +394,26 @@ async fn overview(
                 ))
             })?;
             let history: Vec<(i64, i64, i64, Option<i64>)> = rows.collect::<rusqlite::Result<_>>()?;
-            (path, first, total, fs, partial, fstype, history)
+            (path, first, total, fs, tracked, partial, fstype, history)
         };
 
-        let series: Vec<Value> = history
+        // Cut the chart to the window. Everything the page shows then covers
+        // the same span: before this, the window control moved the gainers
+        // table and left the chart showing all history, so the two cards
+        // disagreed about what "last 24 hours" meant.
+        let from_at = match q.from.as_deref() {
+            None | Some("") => None,
+            Some(spec) => match crate::cli::timespec::parse(spec, at)? {
+                crate::cli::timespec::Target::At(t) => Some(t),
+                crate::cli::timespec::Target::Scan(id) => store_started_at(&s, id).ok(),
+            },
+        };
+        let shown: Vec<&(i64, i64, i64, Option<i64>)> = history
+            .iter()
+            .filter(|(t, ..)| from_at.is_none_or(|f| *t >= f))
+            .collect();
+
+        let series: Vec<Value> = shown
             .iter()
             .map(|(t, b, k, free)| {
                 json!([t, if metric == Metric::Allocated { k } else { b }, free])
@@ -446,7 +480,9 @@ async fn overview(
             "scans": total_scans,
             "first_scan": first.map(|(i, a)| json!({"scan_id": i, "at": a})),
             "fs": { "total": fs.0, "free": fs.1, "avail": fs.2 },
+            "total": if metric == Metric::Allocated { tracked.1 } else { tracked.0 },
             "history": series,
+            "window_from": from_at,
             "forecast": forecast,
             "scan_status": partial.0,
             "scan_error": partial.1,
@@ -1591,4 +1627,14 @@ fn series_for(
 /// figure, not data about anyone's files.
 async fn cache_status(State(s): State<Arc<AppState>>) -> ApiResult {
     blocking(move || Ok(s.cache_stats())).await
+}
+
+/// When a given scan started.
+fn store_started_at(s: &AppState, scan: ScanId) -> anyhow::Result<i64> {
+    let store = s.read();
+    Ok(store.conn.query_row(
+        "SELECT started_at FROM scan WHERE scan_id = ?1",
+        [scan],
+        |r| r.get(0),
+    )?)
 }

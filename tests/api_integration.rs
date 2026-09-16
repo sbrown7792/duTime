@@ -620,3 +620,56 @@ async fn a_truncated_listing_still_reports_each_row_correctly() {
     // Every one that moved got a slot, so the rest are unchanged.
     assert_eq!(l["truncated_changed"], serde_json::json!(0), "{l}");
 }
+
+/// The window control has to move the Overview chart, not just the table
+/// beneath it.
+///
+/// The chart used to be built from the entire recorded history regardless,
+/// so picking "Last hour" narrowed the gainers list while the graph above it
+/// carried on showing everything — two cards on one page disagreeing about
+/// what the window meant.
+#[tokio::test]
+async fn the_overview_chart_follows_the_window() {
+    let mut f = Fixture::new();
+    // Eight hourly samples; the fixture clock advances an hour per snapshot.
+    for i in 0..8 {
+        f.write("data/f.bin", (4 << 20) + (i << 20));
+        f.snapshot();
+    }
+    let (state, _root) = f.finish();
+
+    let all = get(&state, "/api/v1/overview").await;
+    let wide = get(&state, "/api/v1/overview?from=-30d").await;
+    let narrow = get(&state, "/api/v1/overview?from=-3h").await;
+
+    let n = |v: &Value| v["history"].as_array().unwrap().len();
+    assert_eq!(n(&all), n(&wide), "an ample window should show everything");
+    assert!(n(&all) >= 8, "fixture produced too few samples: {}", n(&all));
+    assert!(
+        n(&narrow) < n(&all),
+        "the window did not cut the chart: {} of {}",
+        n(&narrow),
+        n(&all)
+    );
+    assert!(n(&narrow) >= 1, "the window cut everything: {narrow}");
+
+    // Every sample shown must fall inside the window.
+    let from = narrow["window_from"].as_i64().expect("window start not reported");
+    for p in narrow["history"].as_array().unwrap() {
+        let t = p[0].as_i64().unwrap();
+        assert!(t >= from, "sample at {t} predates the window start {from}");
+    }
+
+    // The tracked-size tile is the size *now* and must not move with the
+    // window — it used to be read off the end of the series, which a narrow
+    // window can empty.
+    assert_eq!(all["total"], narrow["total"], "tracked size moved with the window");
+    assert!(all["total"].as_i64().unwrap() > 0);
+
+    // Nor may the projection: it is a property of the disk, not of the view,
+    // and it is fitted to every sample regardless of what is on screen.
+    assert_eq!(
+        all["forecast"], narrow["forecast"],
+        "the projection changed with the view control"
+    );
+}

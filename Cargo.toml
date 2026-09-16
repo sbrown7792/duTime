@@ -1,10 +1,10 @@
 [package]
 name = "dutime"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 build = "build.rs"
 description = "Track disk usage over time"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 # Single source for the link in the web UI's footer and anywhere else that
 # needs it; read at compile time via CARGO_PKG_REPOSITORY.
 repository = "https://github.com/sbrown7792/duTime"

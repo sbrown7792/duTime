@@ -428,11 +428,13 @@ function seriesColors() {
 async function loadOverview() {
   return inPane('#pane-used', async () => {
   const gen = loadGen;
-  const o = await api('overview');
+  const o = await api('overview', { from: state.window });
   if (!isCurrent(gen)) return;
   state.rootPath = o.path.name;
 
-  const used = o.history.length ? o.history[o.history.length - 1][1] : 0;
+  // Stated by the server, not read off the end of the chart: the chart is
+  // cut to the window, and a window with no scan in it would read zero.
+  const used = o.total ?? (o.history.length ? o.history[o.history.length - 1][1] : 0);
   const free = o.fs.free;
   const total = o.fs.total;
   const pct = total ? Math.round(((total - free) / total) * 100) : null;
@@ -476,9 +478,18 @@ async function loadOverview() {
   };
   c.setOption(opt, true);
 
+  // Counts what is plotted, not what is recorded — the two differ now that
+  // the window cuts the chart, and quoting the larger number beside a
+  // shorter line is how a chart starts lying.
+  const shown = o.history.length;
   $('#usedSub').textContent = o.scans < 2
     ? 'Only one sample so far — a trend appears once duTime has scanned a few times.'
-    : `${o.scans} samples since ${fmtTime(o.first_scan.at)}.`;
+    : shown < 2
+      ? `Only ${shown} sample in this window — widen it to see a trend.`
+        + ` ${o.scans.toLocaleString()} recorded in all, since ${fmtTime(o.first_scan.at)}.`
+      : `${shown.toLocaleString()} samples in this window`
+        + (shown < o.scans ? ` of ${o.scans.toLocaleString()} recorded` : '')
+        + `, since ${fmtTime(o.history[0][0])}.`;
 
   // A scan that could not read part of the tree reports a total that is too
   // low, and a shortfall that is never mentioned is indistinguishable from a
