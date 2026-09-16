@@ -16,6 +16,7 @@ pub mod state;
 
 use crate::model::{Metric, PathId, RootId, ScanId};
 use crate::auth::Viewer;
+use crate::store::Store;
 use crate::store::USABLE_SCAN;
 use crate::store::query::{self, Extreme};
 use crate::store::snapshot::Snapshot;
@@ -28,7 +29,7 @@ use base64::Engine;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::sync::Arc;
 
 pub use state::AppState;
@@ -1344,9 +1345,34 @@ async fn listing(
             }
         };
 
-        // Every child, measured before any is dropped.
-        let all: Vec<u32> = snap.children[node as usize].clone();
+        // Every child, present or since deleted, measured before any is
+        // dropped from the listing.
+        let live: Vec<u32> = snap.children[node as usize].clone();
+        let node_id = snap.ids[node as usize];
+        let mut all: Vec<Child> = live
+            .iter()
+            .map(|&c| Child {
+                idx: Some(c),
+                id: snap.ids[c as usize],
+                name: snap.name[c as usize].clone(),
+                kind: snap.kind[c as usize] as u8,
+                size_now: size_of(&snap, c),
+                died_at: None,
+            })
+            .collect();
+        all.extend({
+            let store = s.read();
+            deleted_children(&store, node_id, s1, s2)?
+        });
+
         let w = window_deltas(&s, root, &snap, node, &all, s1, s2, metric)?;
+
+        // What each child's size did between its low and high point in the
+        // window. Ranking on the *net* change would bury exactly the case
+        // this exists for: something created and deleted inside the window
+        // nets to zero, however large it got in between.
+        let sizes: Vec<i64> = all.iter().map(|c| c.size_now).collect();
+        let swing = swings(&w, &sizes);
 
         // Rank by what moved, then by what is big.
         //
@@ -1359,21 +1385,21 @@ async fn listing(
         // order in the browser; this only decides who makes the cut.
         let mut order: Vec<usize> = (0..all.len()).collect();
         order.sort_by(|&a, &b| {
-            (w.totals[b] != 0)
-                .cmp(&(w.totals[a] != 0))
-                .then_with(|| w.totals[b].abs().cmp(&w.totals[a].abs()))
-                .then_with(|| size_of(&snap, all[b]).cmp(&size_of(&snap, all[a])))
+            (swing[b] != 0)
+                .cmp(&(swing[a] != 0))
+                .then_with(|| swing[b].cmp(&swing[a]))
+                .then_with(|| all[b].size_now.cmp(&all[a].size_now))
         });
         let (pick, rest) = order.split_at(order.len().min(limit));
         // How many of the omitted actually changed. Normally zero — the
         // movers are taken first — and when it is zero the UI can say the
         // hidden entries are unchanged rather than merely smaller.
-        let omitted_changed = rest.iter().filter(|&&i| w.totals[i] != 0).count();
+        let omitted_changed = rest.iter().filter(|&&i| swing[i] != 0).count();
 
-        let kids: Vec<u32> = pick.iter().map(|&i| all[i]).collect();
-        // Seeded with the size *now*; `series_for` winds each back to the
-        // start of the window using the deltas already computed.
-        let mut level: Vec<i64> = kids.iter().map(|&c| size_of(&snap, c)).collect();
+        // Seeded with the size *now* — zero for anything deleted, which is
+        // what makes its sparkline end on the floor — and wound back to the
+        // start of the window by `series_for`.
+        let mut level: Vec<i64> = pick.iter().map(|&i| all[i].size_now).collect();
         let spark = series_for(pick, &w, &mut level, points);
         let totals: Vec<i64> = pick.iter().map(|&i| w.totals[i]).collect();
         let own_total = w.own_total;
@@ -1405,22 +1431,38 @@ async fn listing(
         };
         let own_then = own_now - own_total;
 
-        let rows: Vec<Value> = kids
+        let rows: Vec<Value> = pick
             .iter()
             .enumerate()
-            .map(|(bi, &c)| {
-                let i = c as usize;
-                let now = size_of(&snap, c);
+            .map(|(bi, &ci)| {
+                let c = &all[ci];
+                let now = c.size_now;
                 let then = now - totals[bi];
-                let mut v = name_json(&snap.name[i]);
+                let mut v = name_json(&c.name);
                 let o = v.as_object_mut().unwrap();
-                o.insert("id".into(), json!(snap.ids[i]));
-                o.insert("kind".into(), json!(kind_str(snap.kind[i])));
+                o.insert("id".into(), json!(c.id));
+                o.insert("kind".into(), json!(kind_of(c.kind)));
                 o.insert("size".into(), json!(now));
                 o.insert("before".into(), json!(then));
                 o.insert("delta".into(), json!(now - then));
-                o.insert("files".into(), json!(snap.incl_files[i]));
-                o.insert("dirs".into(), json!(snap.incl_dirs[i]));
+                // Counts come from the tree, so a deleted entry has none —
+                // reporting zero would read as "it was empty" rather than
+                // "it is not there any more".
+                match c.idx {
+                    Some(i) => {
+                        let i = i as usize;
+                        o.insert("files".into(), json!(snap.incl_files[i]));
+                        o.insert("dirs".into(), json!(snap.incl_dirs[i]));
+                    }
+                    None => {
+                        o.insert("gone".into(), json!(true));
+                        o.insert("died_at".into(), json!(c.died_at));
+                        // The peak it reached, which for something created
+                        // and deleted inside the window is the only number
+                        // that says how much space it was taking.
+                        o.insert("peak".into(), json!(swing[ci].max(then)));
+                    }
+                }
                 o.insert("spark".into(), json!(spark[bi]));
                 v
             })
@@ -1461,6 +1503,59 @@ async fn listing(
 /// total it, one to replay them in order. Events number in the hundreds even
 /// on a large volume — the storage is change-only — so the second pass costs
 /// nothing next to materialising a whole tree.
+/// A child of the directory being listed, whether or not it still exists.
+///
+/// Entries deleted inside the window are the whole reason this is a struct
+/// rather than a snapshot index. A directory that spikes and returns to
+/// baseline usually did so because something inside it was created and then
+/// removed, and that something is by definition absent from the tree as it
+/// stands — so a listing built only from the current children shows a parent
+/// with an unexplained bump and no child that accounts for it.
+struct Child {
+    /// Position in the end-of-window snapshot, or `None` if it is gone.
+    idx: Option<u32>,
+    id: PathId,
+    name: std::ffi::OsString,
+    kind: u8,
+    /// Size at the end of the window: zero for anything deleted.
+    size_now: i64,
+    died_at: Option<i64>,
+}
+
+/// Direct children that existed during the window but not at the end of it.
+///
+/// Liveness is `born_scan <= S AND (died_scan IS NULL OR S < died_scan)`, so
+/// something alive at any point after the window opened has `died_scan > s1`,
+/// and something already absent at the end has `died_scan <= s2`. Anything
+/// outside that is either still present — in which case the snapshot has it —
+/// or was gone before the window began.
+fn deleted_children(
+    store: &Store,
+    node_id: PathId,
+    s1: ScanId,
+    s2: ScanId,
+) -> anyhow::Result<Vec<Child>> {
+    let mut st = store.conn.prepare(
+        "SELECT p.path_id, p.name, p.kind, p.died_scan,
+                (SELECT started_at FROM scan WHERE scan_id = p.died_scan)
+         FROM path p
+         WHERE p.parent_id = ?1
+           AND p.died_scan IS NOT NULL AND p.died_scan > ?2 AND p.died_scan <= ?3
+           AND p.born_scan <= ?3",
+    )?;
+    let rows = st.query_map([node_id, s1, s2], |r| {
+        Ok(Child {
+            idx: None,
+            id: r.get(0)?,
+            name: std::ffi::OsString::from_vec(r.get::<_, Vec<u8>>(1)?),
+            kind: r.get::<_, i64>(2)? as u8,
+            size_now: 0,
+            died_at: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// What the window did to every child of a directory.
 ///
 /// Computed for *all* children, before any of them are dropped from the
@@ -1488,23 +1583,29 @@ fn window_deltas(
     root: RootId,
     snap: &Snapshot,
     node: u32,
-    kids: &[u32],
+    kids: &[Child],
     s1: ScanId,
     s2: ScanId,
     metric: Metric,
 ) -> anyhow::Result<WindowDeltas> {
     let store = s.read();
 
-    // One downward pass over the subtree, after which resolving an event is
-    // an array index rather than a climb.
-    let bands = band_map(snap, node, kids);
+    // One downward pass over the subtree, after which resolving an event
+    // under a surviving child is an array index rather than a climb.
+    let live: Vec<u32> = kids.iter().filter_map(|c| c.idx).collect();
+    let live_band: Vec<usize> =
+        kids.iter().enumerate().filter(|(_, c)| c.idx.is_some()).map(|(i, _)| i).collect();
+    let bands = band_map(snap, node, &live);
     // Kept only for paths no longer in the tree: a directory deleted
     // mid-window emits its event and then vanishes from the end-of-window
     // snapshot, so there is no index to look up and the climb has to reach
     // the database. Bounded by deletions, not by entities.
+    // Every child by path id, deleted ones included. This is what the climb
+    // consults, and it is the only route to a deleted child: it has no
+    // snapshot index, and neither has anything that was under it.
     let mut band_of: std::collections::HashMap<PathId, usize> = Default::default();
-    for (bi, &k) in kids.iter().enumerate() {
-        band_of.insert(snap.ids[k as usize], bi);
+    for (bi, c) in kids.iter().enumerate() {
+        band_of.insert(c.id, bi);
     }
 
     // Climbing from each event's path, rather than pre-loading the whole
@@ -1557,10 +1658,14 @@ fn window_deltas(
         // Which listed child holds this path — one array index when the path
         // still exists, a database climb only when it does not.
         let band = match snap.idx(pid) {
+            // Still in the tree: the downward pass already placed it. The
+            // band map indexes the surviving children, so translate back.
             Some(i) => match bands[i as usize] {
                 NO_BAND | OTHER_BAND => continue,
-                b => b as usize,
+                b => live_band[b as usize],
             },
+            // Gone from the tree — either a deleted child or something that
+            // was beneath one. Climb, which does not filter on liveness.
             None => match ancestry.band(&band_of, node_id, pid)? {
                 Climb::Band(b) => b,
                 _ => continue,
@@ -1637,4 +1742,41 @@ fn store_started_at(s: &AppState, scan: ScanId) -> anyhow::Result<i64> {
         [scan],
         |r| r.get(0),
     )?)
+}
+
+/// How far each child travelled between its low and high point in the window.
+///
+/// Peak-to-trough, not first-to-last. A file created and deleted inside the
+/// window nets to zero however large it got, and net change is what used to
+/// decide which entries were worth a row — so the one entry that explained a
+/// parent's spike was ranked below every directory that did nothing.
+///
+/// Walks the deltas already in memory; no further reading.
+fn swings(w: &WindowDeltas, size_now: &[i64]) -> Vec<i64> {
+    let n = size_now.len();
+    // Wind back to the start of the window, then replay forwards.
+    let mut level: Vec<i64> = (0..n).map(|i| size_now[i] - w.totals[i]).collect();
+    let mut lo = level.clone();
+    let mut hi = level.clone();
+    for sid in &w.scan_ids {
+        let Some(deltas) = w.by_scan.get(sid) else { continue };
+        for &(b, d) in deltas {
+            let i = b as usize;
+            level[i] += d;
+            lo[i] = lo[i].min(level[i]);
+            hi[i] = hi[i].max(level[i]);
+        }
+    }
+    (0..n).map(|i| hi[i] - lo[i]).collect()
+}
+
+/// Kind as stored in the dictionary, which a deleted entry only has as a
+/// number.
+fn kind_of(k: u8) -> &'static str {
+    match k {
+        0 => "dir",
+        1 => "file",
+        2 => "symlink",
+        _ => "other",
+    }
 }

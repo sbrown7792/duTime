@@ -135,9 +135,16 @@ rather than to whichever span you are looking at.
 **Explorer** — a sortable listing of everything in the current directory with
 a **trend sparkline beside each row**, so you can see which of thirty siblings
 is the one creeping up before deciding which to open. A directory with more
-entries than the listing can show keeps **everything that changed** and fills
+entries than the listing can show keeps **everything that moved** and fills
 the rest with the largest, because the entry worth seeing is rarely the
-biggest one. Then the same directory
+biggest one.
+
+**Anything deleted inside the window is listed too**, struck through, with the
+trend that explains it. A directory whose trend spikes and returns to baseline
+usually did so because something inside it was created and then removed — and
+that something is, by definition, absent from the directory as it now stands.
+A deleted row shows the peak it reached rather than a size, since it no longer
+has one. Then the same directory
 decomposed into its largest children as a stacked area. Then a WinDirStat-style
 treemap with a time slider; drag it and the same tree redraws as it stood at
 that moment. The slider applies to the treemap alone — the panes above it
@@ -501,4 +508,4 @@ aggregation.
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — free for personal, hobby, and nonprofit/educational use; commercial use requires a separate license from the author.
+[GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) or later. Copyright (C) 2026 Steven Brown.

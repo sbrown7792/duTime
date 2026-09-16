@@ -673,3 +673,100 @@ async fn the_overview_chart_follows_the_window() {
         "the projection changed with the view control"
     );
 }
+
+/// A file created and deleted inside the window still gets a row.
+///
+/// This is the case that sends people looking: a directory's trend spikes and
+/// returns to baseline, and nothing inside it shows the same shape — because
+/// the thing that caused it is no longer there to be listed. Its net change
+/// over the window is zero, so it cannot be found by ranking on change
+/// either; the peak is the only number that describes it.
+#[tokio::test]
+async fn a_file_created_and_deleted_inside_the_window_is_listed() {
+    let mut f = Fixture::new();
+    f.write("cfg/app.db", 2 << 20);
+    f.snapshot();
+    f.write("cfg/app.db-wal", 200 << 20); // the spike
+    f.snapshot();
+    fs::remove_file(f.root.join("cfg/app.db-wal")).unwrap(); // checkpointed away
+    f.snapshot();
+    f.write("cfg/app.db-wal", 1 << 20); // recreated small
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let cfg = format!("{}/cfg", root.display());
+    let l = get(
+        &state,
+        &format!("/api/v1/listing?path={}&from=-7d&points=8", enc(Path::new(&cfg))),
+    )
+    .await;
+    let rows = l["rows"].as_array().unwrap();
+
+    let gone: Vec<&Value> =
+        rows.iter().filter(|r| r["gone"] == serde_json::json!(true)).collect();
+    assert_eq!(gone.len(), 1, "expected exactly one deleted entry: {rows:#?}");
+    let g = gone[0];
+    assert_eq!(g["name"], "app.db-wal");
+    assert_eq!(g["size"], serde_json::json!(0), "a deleted entry has no size");
+    // Created and deleted inside the window, so it nets to nothing...
+    assert_eq!(g["delta"], serde_json::json!(0));
+    // ...and the peak is what says how much space it was taking.
+    assert!(
+        g["peak"].as_i64().unwrap() >= 200 << 20,
+        "peak understates the spike: {}", g["peak"]
+    );
+    assert!(g["died_at"].is_number(), "no deletion time: {g}");
+
+    // Its trend must show the spike and the return, not a flat line.
+    let spark: Vec<i64> = g["spark"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+    assert!(spark.iter().max().unwrap() >= &(200 << 20), "trend lost the spike: {spark:?}");
+    assert_eq!(*spark.last().unwrap(), 0, "a deleted entry's trend must end at zero");
+
+    // The recreated file is a separate, live entry with the same name.
+    let live: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r["name"] == "app.db-wal" && r["gone"].is_null())
+        .collect();
+    assert_eq!(live.len(), 1, "the recreated file should be its own row");
+    assert_eq!(live[0]["size"], serde_json::json!(1 << 20));
+}
+
+/// Something deleted before the window began must not reappear.
+#[tokio::test]
+async fn a_deletion_outside_the_window_is_not_listed() {
+    let mut f = Fixture::new();
+    f.write("cfg/old.bin", 40 << 20);
+    f.snapshot();
+    fs::remove_file(f.root.join("cfg/old.bin")).unwrap();
+    f.snapshot();
+    // Several scans later, so a short window cannot reach the deletion.
+    for i in 0..4 {
+        f.write(&format!("cfg/keep{i}.bin"), 2 << 20);
+        f.snapshot();
+    }
+
+    let (state, root) = f.finish();
+    let cfg = format!("{}/cfg", root.display());
+    let recent = get(
+        &state,
+        &format!("/api/v1/listing?path={}&from=-2h", enc(Path::new(&cfg))),
+    )
+    .await;
+    assert!(
+        recent["rows"].as_array().unwrap().iter().all(|r| r["gone"].is_null()),
+        "a deletion from before the window was listed: {}", recent["rows"]
+    );
+
+    // A window that does reach back does show it.
+    let wide = get(
+        &state,
+        &format!("/api/v1/listing?path={}&from=-7d", enc(Path::new(&cfg))),
+    )
+    .await;
+    let gone: Vec<&Value> =
+        wide["rows"].as_array().unwrap().iter().filter(|r| r["gone"] == serde_json::json!(true)).collect();
+    assert_eq!(gone.len(), 1, "the in-window deletion is missing: {}", wide["rows"]);
+    assert_eq!(gone[0]["name"], "old.bin");
+    // It existed when the window opened, so it shows as a real loss.
+    assert!(gone[0]["delta"].as_i64().unwrap() <= -(40 << 20), "{}", gone[0]);
+}

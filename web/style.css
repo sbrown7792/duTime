@@ -582,3 +582,20 @@ body:not(.loading) .card.busy > *:not(figcaption) { opacity: 0.4; }
 /* The Explorer's navigation row: a card by family resemblance, but it holds
    controls rather than content, so it does not need a content card's height. */
 .card.slim { padding: 12px 18px; }
+
+/* ── deleted entries ─────────────────────────────────────────────────── */
+
+/* Struck through and recessive, but still legible: the row is there because
+   it explains something, so it must be readable, just clearly no longer
+   present. Not clickable either — there is nothing to descend into. */
+.listing tr.gone td { color: var(--text-muted); }
+.listing tr.gone td.name s { text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.listing tr.gone .goneNote {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+/* The trend still carries the full colour: the shape of the spike is the
+   whole reason the row is worth showing. */
+.listing tr.gone .spark { opacity: 0.85; }

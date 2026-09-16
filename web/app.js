@@ -924,7 +924,7 @@ async function loadListing() {
     // The swing is what the picture encodes, so name it — otherwise a row
     // that spiked and came back reads as a mystery.
     const range = r.spark && r.spark.length
-      ? `${fmtSize(r.spark[0])} → ${fmtSize(r.spark[r.spark.length - 1])}`
+      ? `${fmtSize(r.spark[0])} → ${r.gone ? 'deleted' : fmtSize(r.spark[r.spark.length - 1])}`
         + ` · moved ${fmtSize(swingOf(r))}`
         + (shared ? ` of ${fmtSize(biggest)} full height` : '')
       : '';
@@ -932,14 +932,29 @@ async function loadListing() {
     const countExact = dirish
       ? `${r.dirs.toLocaleString()} directories, ${r.files.toLocaleString()} files`
       : '';
-    return `<tr class="${dirish ? 'clickable' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}"${dirish ? ' tabindex="0"' : ''}>
-      <td class="name" title="${escapeHtml(r.name)}">
-        <span class="ico">${KIND_ICON[r.kind] || ''}</span>${escapeHtml(r.name)}${r.lossy ? ' <span title="filename is not valid UTF-8">⚠</span>' : ''}
+    // Something deleted inside the window still gets a row. It is usually
+    // the answer to "why did this directory spike and come back": the thing
+    // that caused it is, by definition, no longer here to be listed.
+    //
+    // Struck through, not merely greyed: the point is that it is gone, and
+    // the peak it reached is said outright, because for a file created and
+    // deleted inside the window that is the only number describing how much
+    // space it was taking. Its own size is zero and sorts as zero.
+    const goneNote = r.gone
+      ? `<span class="goneNote">deleted${r.peak ? ` · peaked ${fmtSize(r.peak)}` : ''}</span>`
+      : '';
+    const nameCell = r.gone
+      ? `<s>${escapeHtml(r.name)}</s>${goneNote}`
+      : escapeHtml(r.name);
+    const open = dirish && !r.gone;
+    return `<tr class="${open ? 'clickable' : ''}${r.gone ? ' gone' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}"${open ? ' tabindex="0"' : ''}>
+      <td class="name" title="${escapeHtml(r.name)}${r.gone ? ' — deleted during this window' : ''}">
+        <span class="ico">${KIND_ICON[r.kind] || ''}</span>${nameCell}${r.lossy ? ' <span title="filename is not valid UTF-8">⚠</span>' : ''}
       </td>
-      <td class="num sz">${fmtSize(r.size)}</td>
+      <td class="num sz">${r.gone ? '—' : fmtSize(r.size)}</td>
       <td class="num dl ${r.delta > 0 ? 'up' : r.delta < 0 ? 'down' : ''}">${r.delta ? fmtDelta(r.delta) : '—'}</td>
       <td class="trend" title="${range}">${sparkSvg(r.spark, scale)}</td>
-      <td class="num ct" title="${countExact}">${count}</td>
+      <td class="num ct" title="${countExact}">${r.gone ? (r.died_at ? `gone ${fmtDate(r.died_at)}` : 'gone') : count}</td>
     </tr>`;
   }).join('');
 
@@ -1309,7 +1324,11 @@ async function boot() {
     // Stay where we are if that root is still visible; signing out of a
     // protected root has to land somewhere rather than erroring.
     const keep = r.roots.find((x) => x.root_id === state.root) || r.roots[0];
-    if (keep.root_id !== state.root) state.path = null;
+    // Only when moving off a root we were already on. On the first load
+    // `state.root` is null, so an unguarded comparison discarded the path
+    // that had just been read out of the permalink — every link naming a
+    // directory opened at the root instead.
+    if (state.root != null && keep.root_id !== state.root) state.path = null;
     state.root = keep.root_id;
     state.rootPath = keep.path.name;
     $('#root').value = state.root;

@@ -11,6 +11,39 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.0 — 2026-09-16
+
+### Added
+
+- **Entries deleted inside the window are listed**, struck through, with the
+  trend that explains them.
+
+  This is the case that sends people looking: a directory's trend spikes and
+  returns to baseline, and nothing inside it shows the same shape — because
+  whatever caused it is no longer there to be listed. Found on a real server
+  as a 230 MiB SQLite write-ahead log that was checkpointed away between two
+  scans; the recreated file was listed, flat and 1.9 MiB, while the 230 MiB
+  one it replaced was invisible.
+
+  A deleted row shows no size, because it has none, and says the peak it
+  reached instead — for something created *and* deleted inside the window that
+  is the only number describing how much space it was taking. Its trend ends
+  at zero. It is not clickable, there being nothing to descend into.
+
+### Changed
+
+- Entries are ranked for a listing slot by their **peak-to-trough movement**
+  rather than their net change. Something created and deleted inside the
+  window nets to zero however large it got, so ranking on net change buried
+  exactly the row that explained the parent's spike.
+
+### Fixed
+
+- **Permalinks naming a directory opened at the root instead.** On the first
+  load there is no previously selected root to compare against, and the
+  comparison that clears the path when you switch roots was firing anyway —
+  discarding the path that had just been read out of the URL.
+
 ## 0.4.2 — 2026-09-15
 
 - **The Overview's window control now moves the chart.** It only ever moved
