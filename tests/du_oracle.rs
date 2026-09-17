@@ -392,6 +392,42 @@ fn default_excludes_do_not_shadow_same_named_user_directories() {
     );
 }
 
+/// An absolute exclude must survive a root that is reached through a symlink.
+///
+/// The walker canonicalizes the root, so a prefix still carrying a link in it
+/// fails `starts_with(root)` and is quietly discarded -- the scan then runs
+/// with no excludes at all and says nothing. Anyone whose root is a symlinked
+/// mount gets silently wrong totals, which is the one failure mode this whole
+/// file exists to prevent.
+#[test]
+fn absolute_excludes_survive_a_symlinked_root() {
+    let td = fixture();
+    build_collider(td.path(), "skipme");
+    let with_all = du_apparent(td.path());
+
+    // Reach the very same tree through a link rather than its real path.
+    let link_parent = tempfile::Builder::new()
+        .prefix("dutime-link-")
+        .tempdir_in("target/fixtures")
+        .unwrap();
+    let linked_root = link_parent.path().join("root");
+    std::os::unix::fs::symlink(td.path(), &linked_root).unwrap();
+
+    let mut opts = ScanOptions::new(&linked_root);
+    opts.exclude_prefixes = vec![linked_root.join("skipme")];
+    let r = scan(&opts).expect("scan");
+    let roll = r.tree.rollup();
+
+    assert!(
+        roll.bytes[0] < with_all,
+        "an absolute exclude was dropped because the root was reached via a symlink"
+    );
+    assert!(
+        (0..r.tree.len()).all(|i| r.tree.name[i] != "skipme"),
+        "the excluded directory should not appear at all"
+    );
+}
+
 /// Absolute excludes still work when they really are inside the root.
 #[test]
 fn absolute_excludes_apply_when_genuinely_inside_the_root() {

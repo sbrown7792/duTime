@@ -167,11 +167,17 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
     // A prefix that *contains* the root is deliberately ignored: if someone
     // configures /snap/foo as a root, they have explicitly asked for it, and
     // silently returning an empty tree would be worse than useless.
+    // Resolve each prefix the same way the root was resolved. `root` is
+    // canonical, so a prefix that still carries a symlink in it would fail
+    // `starts_with` and be dropped here -- every absolute exclude silently
+    // doing nothing, with no warning, whenever the root is reached through a
+    // link. A prefix that does not exist keeps its literal form: excluding a
+    // path that is not there yet is legitimate.
     let prefixes: Vec<PathBuf> = opts
         .exclude_prefixes
         .iter()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
         .filter(|p| p.starts_with(&root) && p.as_path() != root)
-        .cloned()
         .collect();
 
     let matcher = build_matcher(&root, &opts.exclude)?;

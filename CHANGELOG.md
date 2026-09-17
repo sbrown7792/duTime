@@ -11,6 +11,24 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.2 — 2026-09-17
+
+- **An absolute exclude no longer disappears when the root is reached through
+  a symlink.** `scan()` canonicalizes its root, then kept each configured
+  `exclude_paths` entry in whatever form it was written and filtered them with
+  `starts_with(root)`. A root behind a link failed every one of those
+  comparisons, so the prefixes were discarded in silence and the scan ran with
+  no absolute excludes at all while reporting nothing unusual. The default
+  configuration ships system paths in exactly that field, so on such a host
+  the result was a walk into `/proc` and its neighbours, or simply a wrong
+  total, with no signal that anything had been ignored. Prefixes are now
+  resolved the same way the root is. One that does not exist keeps its literal
+  form, since excluding a path that is not there yet is legitimate.
+
+  Found because the build directory was moved out of a file-sync folder and
+  symlinked back, which put a link in the path of the `du` oracle's own
+  fixtures and turned the silent failure into a failing test.
+
 ## 0.5.1 — 2026-09-16
 
 - **A name deleted and recreated is one row, not one row per generation.**
