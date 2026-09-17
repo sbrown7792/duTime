@@ -1353,17 +1353,21 @@ async fn listing(
             .iter()
             .map(|&c| Child {
                 idx: Some(c),
+                ids: vec![snap.ids[c as usize]],
                 id: snap.ids[c as usize],
                 name: snap.name[c as usize].clone(),
                 kind: snap.kind[c as usize] as u8,
                 size_now: size_of(&snap, c),
                 died_at: None,
+                generations: 1,
             })
             .collect();
         all.extend({
             let store = s.read();
             deleted_children(&store, node_id, s1, s2)?
         });
+        // One row per location, not per generation.
+        let all = merge_by_name(all);
 
         let w = window_deltas(&s, root, &snap, node, &all, s1, s2, metric)?;
 
@@ -1448,6 +1452,11 @@ async fn listing(
                 // Counts come from the tree, so a deleted entry has none —
                 // reporting zero would read as "it was empty" rather than
                 // "it is not there any more".
+                if c.generations > 1 {
+                    // This name has been deleted and remade. Worth saying:
+                    // it is why the trend dips to the floor and back.
+                    o.insert("generations".into(), json!(c.generations));
+                }
                 match c.idx {
                     Some(i) => {
                         let i = i as usize;
@@ -1512,14 +1521,31 @@ async fn listing(
 /// stands — so a listing built only from the current children shows a parent
 /// with an unexplained bump and no child that accounts for it.
 struct Child {
-    /// Position in the end-of-window snapshot, or `None` if it is gone.
+    /// Position in the end-of-window snapshot of the generation that is
+    /// currently present, or `None` if nothing by this name is.
     idx: Option<u32>,
+    /// Every generation recorded at this name.
+    ///
+    /// A deleted-then-recreated file is a new row in the dictionary — a
+    /// location that is emptied and refilled is not the same bytes, and the
+    /// store is right to say so. But the *listing* is about locations, which
+    /// is duTime's whole premise: "/var/log/big.log is growing" is the
+    /// question people ask. A SQLite write-ahead log checkpointed away once a
+    /// day produced nineteen rows for one filename in a thirty-day window,
+    /// which buries the directory it is in. They are one row here, and the
+    /// gaps show as the zero-byte periods they were.
+    ids: Vec<PathId>,
+    /// The generation to report: the live one, else the last to die.
     id: PathId,
     name: std::ffi::OsString,
     kind: u8,
-    /// Size at the end of the window: zero for anything deleted.
+    /// Size at the end of the window: zero if nothing is there now.
     size_now: i64,
+    /// When the most recent generation died, if none is present now.
     died_at: Option<i64>,
+    /// How many generations this name has had in the window. More than one
+    /// means it has been recreated, which is itself worth knowing.
+    generations: usize,
 }
 
 /// Direct children that existed during the window but not at the end of it.
@@ -1544,16 +1570,57 @@ fn deleted_children(
            AND p.born_scan <= ?3",
     )?;
     let rows = st.query_map([node_id, s1, s2], |r| {
+        let id: PathId = r.get(0)?;
         Ok(Child {
             idx: None,
-            id: r.get(0)?,
+            ids: vec![id],
+            id,
             name: std::ffi::OsString::from_vec(r.get::<_, Vec<u8>>(1)?),
             kind: r.get::<_, i64>(2)? as u8,
             size_now: 0,
             died_at: r.get(4)?,
+            generations: 1,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Fold generations of the same name into one entry per location.
+///
+/// At most one generation of a name is alive at any scan — the dictionary's
+/// live-uniqueness index guarantees it — so adding their series together
+/// gives the size of that *location* over time, with zero through the gaps.
+/// No number is invented: each generation contributes only where it existed.
+fn merge_by_name(children: Vec<Child>) -> Vec<Child> {
+    let mut out: Vec<Child> = Vec::with_capacity(children.len());
+    let mut at: std::collections::HashMap<std::ffi::OsString, usize> = Default::default();
+    for c in children {
+        match at.get(&c.name) {
+            None => {
+                at.insert(c.name.clone(), out.len());
+                out.push(c);
+            }
+            Some(&i) => {
+                let dst = &mut out[i];
+                dst.ids.extend(c.ids);
+                dst.generations += c.generations;
+                // The live generation is the one to report: it has the size,
+                // the counts, and somewhere to click through to. Failing
+                // that, the one that died most recently.
+                if c.idx.is_some() {
+                    dst.idx = c.idx;
+                    dst.id = c.id;
+                    dst.kind = c.kind;
+                    dst.size_now = c.size_now;
+                    dst.died_at = None;
+                } else if dst.idx.is_none() && c.died_at > dst.died_at {
+                    dst.id = c.id;
+                    dst.died_at = c.died_at;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// What the window did to every child of a directory.
@@ -1605,7 +1672,9 @@ fn window_deltas(
     // snapshot index, and neither has anything that was under it.
     let mut band_of: std::collections::HashMap<PathId, usize> = Default::default();
     for (bi, c) in kids.iter().enumerate() {
-        band_of.insert(c.id, bi);
+        for &id in &c.ids {
+            band_of.insert(id, bi);
+        }
     }
 
     // Climbing from each event's path, rather than pre-loading the whole

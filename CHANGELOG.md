@@ -11,6 +11,26 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.1 — 2026-09-16
+
+- **A name deleted and recreated is one row, not one row per generation.**
+  0.5.0 started listing deleted entries, and a SQLite write-ahead log
+  checkpointed away daily promptly produced *nineteen* rows for one filename
+  in a thirty-day window — burying the directory it was in. The store still
+  records each generation separately, which is right: a location that is
+  emptied and refilled is not the same bytes. But the listing is about
+  locations, which is duTime's premise, so the generations are added together
+  there and the gaps appear as the zero-byte periods they were. The row says
+  how many times the name has been recreated.
+
+  Merged in the query rather than by reviving the dictionary row, which was
+  the obvious alternative and is wrong: `incl_files` counts file *nodes*
+  regardless of size, so a revived row would have inflated historical file
+  counts for every scan in the gap.
+
+- **A favicon**, drawn as the treemap the app is built around, with the gaps
+  sized so the four blocks stay separate at 16px.
+
 ## 0.5.0 — 2026-09-16
 
 ### Added

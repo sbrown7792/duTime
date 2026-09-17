@@ -590,7 +590,9 @@ body:not(.loading) .card.busy > *:not(figcaption) { opacity: 0.4; }
    present. Not clickable either — there is nothing to descend into. */
 .listing tr.gone td { color: var(--text-muted); }
 .listing tr.gone td.name s { text-decoration-thickness: 1px; text-underline-offset: 2px; }
-.listing tr.gone .goneNote {
+/* Not scoped to `tr.gone`: a live location that has been recreated carries
+   this note too, and scoping it there ran the note straight into the name. */
+.listing .goneNote {
   margin-left: 8px;
   font-size: 11px;
   color: var(--text-muted);

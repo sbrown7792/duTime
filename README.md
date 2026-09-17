@@ -144,7 +144,13 @@ trend that explains it. A directory whose trend spikes and returns to baseline
 usually did so because something inside it was created and then removed — and
 that something is, by definition, absent from the directory as it now stands.
 A deleted row shows the peak it reached rather than a size, since it no longer
-has one. Then the same directory
+has one.
+
+A name that is deleted and recreated — a SQLite write-ahead log, say — stays
+**one row**, with the gaps showing as the zero-byte periods they were. The
+store records each generation separately, because a location that is emptied
+and refilled is not the same bytes; the listing adds them back together,
+because "is this path growing" is the question being asked. Then the same directory
 decomposed into its largest children as a stacked area. Then a WinDirStat-style
 treemap with a time slider; drag it and the same tree redraws as it stood at
 that moment. The slider applies to the treemap alone — the panes above it

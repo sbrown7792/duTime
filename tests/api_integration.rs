@@ -702,33 +702,27 @@ async fn a_file_created_and_deleted_inside_the_window_is_listed() {
     .await;
     let rows = l["rows"].as_array().unwrap();
 
-    let gone: Vec<&Value> =
-        rows.iter().filter(|r| r["gone"] == serde_json::json!(true)).collect();
-    assert_eq!(gone.len(), 1, "expected exactly one deleted entry: {rows:#?}");
-    let g = gone[0];
-    assert_eq!(g["name"], "app.db-wal");
-    assert_eq!(g["size"], serde_json::json!(0), "a deleted entry has no size");
-    // Created and deleted inside the window, so it nets to nothing...
-    assert_eq!(g["delta"], serde_json::json!(0));
-    // ...and the peak is what says how much space it was taking.
-    assert!(
-        g["peak"].as_i64().unwrap() >= 200 << 20,
-        "peak understates the spike: {}", g["peak"]
-    );
-    assert!(g["died_at"].is_number(), "no deletion time: {g}");
+    // One row for the name, not one per generation. The store records a new
+    // path each time the file is recreated — a refilled location is not the
+    // same bytes — but the listing is about locations, and a WAL checkpointed
+    // away daily would otherwise bury the directory in its own history.
+    let wal: Vec<&Value> = rows.iter().filter(|r| r["name"] == "app.db-wal").collect();
+    assert_eq!(wal.len(), 1, "one row per location, got {}: {rows:#?}", wal.len());
+    let w = wal[0];
+    assert_eq!(w["generations"], serde_json::json!(2), "generations not reported: {w}");
 
-    // Its trend must show the spike and the return, not a flat line.
-    let spark: Vec<i64> = g["spark"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+    // Something is there now, so the row is not struck through, and it
+    // carries the current file's size.
+    assert!(w["gone"].is_null(), "a location that exists was marked gone: {w}");
+    assert_eq!(w["size"], serde_json::json!(1 << 20));
+
+    // The trend is the location's whole story: the spike, the gap at zero
+    // while nothing was there, and the small file that replaced it.
+    let spark: Vec<i64> =
+        w["spark"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
     assert!(spark.iter().max().unwrap() >= &(200 << 20), "trend lost the spike: {spark:?}");
-    assert_eq!(*spark.last().unwrap(), 0, "a deleted entry's trend must end at zero");
-
-    // The recreated file is a separate, live entry with the same name.
-    let live: Vec<&Value> = rows
-        .iter()
-        .filter(|r| r["name"] == "app.db-wal" && r["gone"].is_null())
-        .collect();
-    assert_eq!(live.len(), 1, "the recreated file should be its own row");
-    assert_eq!(live[0]["size"], serde_json::json!(1 << 20));
+    assert!(spark.contains(&0), "trend never dips to zero for the gap: {spark:?}");
+    assert_eq!(*spark.last().unwrap(), 1 << 20, "trend must end at the current size");
 }
 
 /// Something deleted before the window began must not reappear.

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="duTime">
+  <!-- A treemap, because that is what duTime looks like and a tab strip is
+       won by being recognisable at 16px rather than by being detailed. Four
+       blocks with one dominant, stepping in lightness the way the app's
+       depth ramp does. The 3-unit gaps are deliberate: at 2 they closed
+       up under antialiasing at 16px and the whole thing read as one square. -->
+  <rect width="32" height="32" rx="7" fill="#1b5aa8"/>
+  <g fill="#fff">
+    <rect x="4"  y="4"  width="13" height="13" rx="1" opacity=".95"/>
+    <rect x="20" y="4"  width="8"  height="13" rx="1" opacity=".72"/>
+    <rect x="4"  y="20" width="13" height="8"  rx="1" opacity=".55"/>
+    <rect x="20" y="20" width="8"  height="8"  rx="1" opacity=".38"/>
+  </g>
+</svg>

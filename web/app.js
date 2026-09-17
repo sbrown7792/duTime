@@ -940,12 +940,15 @@ async function loadListing() {
     // the peak it reached is said outright, because for a file created and
     // deleted inside the window that is the only number describing how much
     // space it was taking. Its own size is zero and sorts as zero.
-    const goneNote = r.gone
+    // A location that has been deleted and remade is one row, and the count
+    // says so — it is why the trend drops to the floor and climbs back.
+    const gens = r.generations > 1
+      ? `<span class="goneNote">recreated ${r.generations - 1}×</span>` : '';
+    const note = r.gone
       ? `<span class="goneNote">deleted${r.peak ? ` · peaked ${fmtSize(r.peak)}` : ''}</span>`
-      : '';
-    const nameCell = r.gone
-      ? `<s>${escapeHtml(r.name)}</s>${goneNote}`
-      : escapeHtml(r.name);
+      : gens;
+    const nameCell =
+      (r.gone ? `<s>${escapeHtml(r.name)}</s>` : escapeHtml(r.name)) + note;
     const open = dirish && !r.gone;
     return `<tr class="${open ? 'clickable' : ''}${r.gone ? ' gone' : ''}" data-name="${escapeHtml(r.name)}" data-dir="${dirish}"${open ? ' tabindex="0"' : ''}>
       <td class="name" title="${escapeHtml(r.name)}${r.gone ? ' — deleted during this window' : ''}">
