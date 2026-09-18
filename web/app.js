@@ -595,7 +595,38 @@ async function loadScans() {
     $('#diffTo').value = has(state.diffTo)
       ? state.diffTo
       : state.scans[state.scans.length - 1].scan_id;
+    syncDiffBounds();
   }
+}
+
+/** Keep the comparison window pointing forwards.
+ *
+ * A window running backwards renders a picture that is internally correct
+ * and reads as a lie: every growth appears as a shrink, in the one view
+ * whose entire content is which way things moved. Nothing prevented it,
+ * and nothing about the result announced it.
+ *
+ * The impossible options are disabled rather than silently swapped, so the
+ * control states its constraint up front instead of correcting a choice
+ * after it is made — and `scans` is ordered oldest first, so position in
+ * the list is chronological order.
+ */
+function syncDiffBounds() {
+  const f = $('#diffFrom'), t = $('#diffTo');
+  const n = state.scans.length;
+  // One scan is not a comparison. Leave both alone rather than disabling
+  // every option and presenting a control that cannot be used at all.
+  if (n < 2) return;
+
+  // A scan with nothing after it can never start a window.
+  Array.from(f.options).forEach((o, i) => { o.disabled = i >= n - 1; });
+  if (f.selectedIndex >= n - 1) f.selectedIndex = n - 2;
+
+  const fi = f.selectedIndex;
+  Array.from(t.options).forEach((o, i) => { o.disabled = i <= fi; });
+  // A disabled option stays selected in every browser, so moving "from"
+  // forward has to carry "to" with it rather than strand it behind.
+  if (t.selectedIndex <= fi) t.selectedIndex = fi + 1;
 }
 
 function currentScan() {
@@ -1285,7 +1316,11 @@ async function init() {
   // anything on screen.
   $('#timeSlider').addEventListener('change', () => loadTreemap());
 
-  $('#diffFrom').addEventListener('change', () => { loadDiff(); syncHash(); });
+  $('#diffFrom').addEventListener('change', () => {
+    syncDiffBounds();
+    loadDiff();
+    syncHash();
+  });
   $('#diffTo').addEventListener('change', () => { loadDiff(); syncHash(); });
 
   $('#csv').addEventListener('click', () => {

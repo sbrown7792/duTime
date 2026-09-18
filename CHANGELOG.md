@@ -11,6 +11,23 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.4 — 2026-09-17
+
+- **A comparison can no longer run backwards.** Nothing stopped "to" being
+  earlier than "from", and the result was a picture that is internally
+  correct and reads as a lie: every growth shown as a shrink, in the one
+  view whose entire content is which way things moved. Nothing in the output
+  announced the inversion either.
+
+  The impossible options are now disabled rather than the pair being
+  silently swapped, so the control states its constraint instead of
+  correcting a choice after it is made: "to" offers only scans after the
+  selected "from", and a scan with nothing after it cannot be a "from" at
+  all. Moving "from" past "to" carries "to" forward with it, since a
+  disabled option stays selected in every browser and would otherwise be
+  stranded behind. A shared permalink that arrives inverted is corrected on
+  load and the URL rewritten to the pair actually shown.
+
 ## 0.5.3 — 2026-09-17
 
 - **The Compare legend shows the half of its scale that was invisible.** The
