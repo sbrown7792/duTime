@@ -29,6 +29,13 @@
   --d3: #0d366b; --d2: #256abf; --d1: #86b6ef;
   --d0: #f0efec;
   --u1: #f0a3a3; --u2: #d03b3b; --u3: #8c1f1f;
+  /* Ink for a glyph sitting on each step. Stated per theme rather than
+     derived from the step number: the ramp is re-stepped for dark, not
+     flipped, so "3 is the dark end" is only true in light. Every pair below
+     clears 4.5:1 against its own background. */
+  --d3-ink: #ffffff; --d2-ink: #ffffff; --d1-ink: #0b0b0b;
+  --d0-ink: #0b0b0b;
+  --u1-ink: #0b0b0b; --u2-ink: #ffffff; --u3-ink: #ffffff;
 
   --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
   --success-text: #006300;
@@ -46,6 +53,9 @@
     --d3: #9ec5f4; --d2: #3987e5; --d1: #1c5cab;
     --d0: #383835;
     --u1: #8c1f1f; --u2: #d03b3b; --u3: #e89a9a;
+    --d3-ink: #0b0b0b; --d2-ink: #0b0b0b; --d1-ink: #ffffff;
+    --d0-ink: #ffffff;
+    --u1-ink: #ffffff; --u2-ink: #ffffff; --u3-ink: #0b0b0b;
     --success-text: #0ca30c;
   }
 }
@@ -60,6 +70,9 @@
   --d3: #9ec5f4; --d2: #3987e5; --d1: #1c5cab;
   --d0: #383835;
   --u1: #8c1f1f; --u2: #d03b3b; --u3: #e89a9a;
+  --d3-ink: #0b0b0b; --d2-ink: #0b0b0b; --d1-ink: #ffffff;
+  --d0-ink: #ffffff;
+  --u1-ink: #ffffff; --u2-ink: #ffffff; --u3-ink: #0b0b0b;
   --success-text: #0ca30c;
 }
 
@@ -265,10 +278,13 @@ tr:last-child td { border-bottom: none; }
   font-size: 9px; color: var(--text-primary); border-radius: 2px;
 }
 .divlegend em { font-style: normal; margin-left: 8px; }
-.sw.d3{background:var(--d3)} .sw.d2{background:var(--d2)} .sw.d1{background:var(--d1)}
-.sw.d0{background:var(--d0)}
-.sw.u1{background:var(--u1)} .sw.u2{background:var(--u2)} .sw.u3{background:var(--u3)}
-.sw.d3, .sw.u3 { color: #fff; }
+.sw.d3{background:var(--d3);color:var(--d3-ink)}
+.sw.d2{background:var(--d2);color:var(--d2-ink)}
+.sw.d1{background:var(--d1);color:var(--d1-ink)}
+.sw.d0{background:var(--d0);color:var(--d0-ink)}
+.sw.u1{background:var(--u1);color:var(--u1-ink)}
+.sw.u2{background:var(--u2);color:var(--u2-ink)}
+.sw.u3{background:var(--u3);color:var(--u3-ink)}
 
 .empty { padding: 34px; text-align: center; color: var(--text-muted); font-size: 13px; }
 

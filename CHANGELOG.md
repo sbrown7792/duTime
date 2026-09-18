@@ -11,6 +11,30 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.3 — 2026-09-17
+
+- **The Compare legend shows the half of its scale that was invisible.** The
+  legend markup named its three "shrank" chips `d-3 d-2 d-1` while the
+  stylesheet painted `.sw.d3 .sw.d2 .sw.d1`, so those three rendered fully
+  transparent: bare minus signs floating beside the grey and red chips. The
+  legend said "shrank → grew" while showing no colour for shrank at all —
+  which is the one thing it exists to say, since blue is otherwise unexplained.
+
+- **Legend glyphs gradate, and stay legible in both themes.** The chips read
+  `−− − −` and `+ + ++`, repeating two glyphs and so failing as the
+  non-colour encoding they are there to provide; they now step `−−− −− −` and
+  `+ ++ +++`. Their ink was picked by a rule that assumed step 3 is the dark
+  end of the ramp — true in light, false in dark, where the ramp is re-stepped
+  rather than flipped, so the darkest chips are `d1`/`u1`. White on the light
+  `#e89a9a` chip measured 2.2:1. Each step now carries its own ink token per
+  theme, and every one of the fourteen pairs was measured at 4.5:1 or better;
+  two light-mode pairs that had always been below it are fixed in passing.
+
+  A test pins both halves: every swatch class must have a rule that paints it,
+  and a step defined in three themes must have an ink defined in three themes.
+  The bug was a mistyped class name, which reading cannot catch — both halves
+  look correct on their own.
+
 ## 0.5.2 — 2026-09-17
 
 - **One deleted directory no longer blanks the whole Explorer tab.** The
