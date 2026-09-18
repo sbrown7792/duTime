@@ -928,8 +928,15 @@ async function loadListing() {
         + ` · moved ${fmtSize(swingOf(r))}`
         + (shared ? ` of ${fmtSize(biggest)} full height` : '')
       : '';
-    const count = dirish ? `${fmtCount(r.dirs)} dirs, ${fmtCount(r.files)} files` : '';
-    const countExact = dirish
+    // Counts come from the tree, so an entry that is gone has none — the
+    // API omits them rather than sending zero, which would read as "it was
+    // empty" instead of "it is not there any more". The cell itself already
+    // says "gone" for those rows, but the tooltip beside it is built for
+    // every row, so absence has to be tolerated here and not assumed away
+    // from `kind` alone: a deleted directory is still a directory.
+    const counted = dirish && r.dirs != null;
+    const count = counted ? `${fmtCount(r.dirs)} dirs, ${fmtCount(r.files)} files` : '';
+    const countExact = counted
       ? `${r.dirs.toLocaleString()} directories, ${r.files.toLocaleString()} files`
       : '';
     // Something deleted inside the window still gets a row. It is usually

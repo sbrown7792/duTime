@@ -725,6 +725,45 @@ async fn a_file_created_and_deleted_inside_the_window_is_listed() {
     assert_eq!(*spark.last().unwrap(), 1 << 20, "trend must end at the current size");
 }
 
+/// A deleted directory reports no counts, and that absence is the contract.
+///
+/// Counts come from the resident tree, so an entry that is gone has none,
+/// and sending zero would read as "it was empty" rather than "it is not
+/// there any more". The omission is deliberate — but it means `kind` alone
+/// does not imply the fields are present, because a deleted directory is
+/// still a directory. The web UI read them straight off any `dir` row to
+/// build a tooltip, so one removed directory threw and took the entire
+/// Explorer tab down with it: no listing, no composition chart, just an
+/// error. Pin the shape here so the omission stays visible to whoever
+/// renders it next.
+#[tokio::test]
+async fn a_deleted_directory_reports_no_counts() {
+    let mut f = Fixture::new();
+    f.write("keep/a.bin", 3 << 20);
+    f.write("goingaway/sub/b.bin", 5 << 20);
+    f.snapshot();
+    fs::remove_dir_all(f.root.join("goingaway")).unwrap();
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let l = get(&state, &format!("/api/v1/listing?path={}&from=-7d&points=8", enc(&root))).await;
+    let rows = l["rows"].as_array().unwrap();
+
+    let gone =
+        rows.iter().find(|r| r["name"] == "goingaway").expect("a deleted directory is still listed");
+    assert_eq!(gone["gone"], serde_json::json!(true), "not flagged as deleted: {gone}");
+    assert_eq!(gone["kind"], serde_json::json!("dir"), "still a directory: {gone}");
+    assert!(gone["dirs"].is_null(), "a deleted entry must not report counts: {gone}");
+    assert!(gone["files"].is_null(), "a deleted entry must not report counts: {gone}");
+
+    // The surviving sibling does carry them, so a missing count means "gone"
+    // and not merely a field this endpoint never sends.
+    let live =
+        rows.iter().find(|r| r["name"] == "keep").expect("the surviving directory is listed");
+    assert!(live["dirs"].is_i64(), "a live directory must report counts: {live}");
+    assert!(live["files"].is_i64(), "a live directory must report counts: {live}");
+}
+
 /// Something deleted before the window began must not reappear.
 #[tokio::test]
 async fn a_deletion_outside_the_window_is_not_listed() {

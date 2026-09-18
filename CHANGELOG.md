@@ -13,6 +13,18 @@ between releases.
 
 ## 0.5.2 — 2026-09-17
 
+- **One deleted directory no longer blanks the whole Explorer tab.** The
+  listing omits item counts for an entry that is gone, deliberately: they come
+  from the resident tree, and sending zero would read as "it was empty" rather
+  than "it is not there any more". The web UI decided whether to read those
+  counts from `kind` alone, and a deleted directory is still a directory — so
+  it read `undefined`, threw, and the error propagated up through the one
+  handler that loads all three Explorer panes. The result was an error toast
+  reading `Cannot read properties of undefined` and an empty tab: no contents
+  listing, and no composition chart either, since the throw happened before it
+  was reached. Any root where a directory was merely removed was affected, and
+  0.5.0 made it reachable by listing deleted entries in the first place.
+
 - **An absolute exclude no longer disappears when the root is reached through
   a symlink.** `scan()` canonicalizes its root, then kept each configured
   `exclude_paths` entry in whatever form it was written and filtered them with
