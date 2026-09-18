@@ -132,8 +132,22 @@ extrapolate from. The window control moves the chart and the gainers table
 together; the projection ignores it, being fitted to every sample there is
 rather than to whichever span you are looking at.
 
-**Explorer** — a sortable listing of everything in the current directory with
-a **trend sparkline beside each row**, so you can see which of thirty siblings
+The used-space chart's vertical scale is a choice, because there are two
+questions and they want opposite axes. **Changes** fits the axis to the range
+in the window, so 200 GB of movement on a 95 TB volume is a visible slope
+rather than a flat line pinned near the top. **Filesystem** runs from zero to
+the size of the disk and answers how much room is left instead, with the
+gridlines at quarters of the disk. The caption always says which one is in
+force, and the filled area appears only under an axis that really does start
+at zero.
+
+![Overview](docs/overview.png)
+
+**Explorer** — three panes over one directory, in the order you read them:
+what is in it, how it got that way, and where the bulk sits.
+
+**Contents** is a sortable listing of everything in the directory with a
+**trend sparkline beside each row**, so you can see which of thirty siblings
 is the one creeping up before deciding which to open. A directory with more
 entries than the listing can show keeps **everything that moved** and fills
 the rest with the largest, because the entry worth seeing is rarely the
@@ -150,26 +164,20 @@ A name that is deleted and recreated — a SQLite write-ahead log, say — stays
 **one row**, with the gaps showing as the zero-byte periods they were. The
 store records each generation separately, because a location that is emptied
 and refilled is not the same bytes; the listing adds them back together,
-because "is this path growing" is the question being asked. Then the same directory
-decomposed into its largest children as a stacked area. Then a WinDirStat-style
-treemap with a time slider; drag it and the same tree redraws as it stood at
-that moment. The slider applies to the treemap alone — the panes above it
-always show the present.
+because "is this path growing" is the question being asked. The row says how
+many times the name has been recreated, which is itself worth knowing.
 
-Each pane reports its own progress — they finish at different times, and a
-single page-wide spinner that clears when the last one lands tells you
-nothing about which is still working.
-
-Both scales measure **movement**, and differ only in whose movement sets the
+The **Trend scale** control decides what the sparklines are drawn against.
+Both scales measure *movement*, and differ only in whose movement sets the
 height — every row is drawn from its own low point, because the Size column
 already answers how big a directory is.
 
-**Per row** gives each row the full height of its own cell and shows *shape*:
+*Per row* gives each row the full height of its own cell and shows **shape**:
 a directory quietly doubling from 40 MB looks as dramatic as one adding
 400 GB, which is the point when you are hunting for something starting to run
 away.
 
-**Shared** takes the largest movement on the page, so that row fills its cell
+*Shared* takes the largest movement on the page, so that row fills its cell
 top to bottom and everything else is drawn to the same ruler — a row that
 moved a tenth as much is a tenth as tall. On a volume holding a static 400 GB
 archive and a log growing by 21 GB, the log fills the cell and the archive is
@@ -181,12 +189,41 @@ directory that gained 700 GB and gave it back nets zero but still needs the
 vertical room, and a scale that ignored it would clip the line out of the
 cell. The choice is remembered and travels in the permalink.
 
+**Composition** is the same directory decomposed into its largest children as
+a stacked area, so you can see which child a rise belongs to rather than only
+that the total rose.
+
+**Blocks** is a WinDirStat-style treemap with a time slider: drag it and the
+same tree redraws as it stood at that moment. The slider applies to this pane
+alone — the two above it always show the present.
+
+Each pane reports its own progress. They finish at different times, and a
+single page-wide spinner that clears when the last one lands tells you
+nothing about which is still working.
+
 ![Explorer](docs/explorer.png)
 
 **Changes** — biggest gainers and losers over any window, exclusive or
 inclusive, exportable as CSV.
 
-**Compare** — the diff treemap at the top of this page.
+**Compare** — the diff treemap at the top of this page. Pick two moments:
+area is the larger of the two sizes, so something deleted still shows at the
+scale it mattered, and colour is the change.
+
+Most of a large tree is unchanged, and drawing it buries what is not: a week
+of a real media library produced 41,620 rectangles of which 41,486 — 99.7% —
+had a delta of exactly zero. A subtree with no movement anywhere inside it
+holds no diff information by definition, so it is drawn as a single tile at
+its own size instead of being opened up. When the list of children has to be
+cut, **what moved outranks what is merely big**, so the change cannot fall
+off the end behind larger static siblings — measured on that library, one
+directory had moved 48 GB while its 300 largest children had moved nothing
+between them.
+
+Tiles carry a name only where the whole name fits and only where something
+moved; everything else is a plain block. Hovering any tile — here or in the
+Explorer's Blocks pane — names its **full path**, which in a tree holding a
+hundred files called `movie.mkv` is the only thing that identifies it.
 
 Every view is linkable: the URL carries the path, window and comparison, so you
 can paste exactly what you are looking at into a ticket. A status line at the
@@ -462,33 +499,24 @@ Scale is entity count, not disk size. Measured on a synthetic 1.3M-entity
 volume (`cargo run --release --example bench_large`), opening the Explorer
 after a root change:
 
-| | before | after |
-|---|---|---|
-| treemap | 2.0 s | 2.0 s cold, 0.08 s warm |
-| **Contents**, ordinary window | **2.3 s** | **0.012 s** |
-| **Contents**, window containing a baseline scan | **12 s** | **0.62 s** |
-| **stacked area**, ditto | **7.5 s** | **0.64 s** |
+| pane | time |
+|---|---|
+| Blocks (treemap) | 2.0 s cold, 0.08 s warm |
+| Contents, ordinary window | 0.012 s |
+| Contents, window containing a root's first scan | 0.62 s |
+| Composition (stacked area), ditto | 0.64 s |
 
-The second and third rows are the case that bites once a volume has been
-scanned for the first time. That scan emits one event per entity — 1,463,512
-on a real Nextcloud volume — and every window containing it has to account for
-all of them. Both panes used to resolve each event to a child by climbing its
-ancestors with a database lookup per level; they now walk *down* the subtree
-once, so each event is an array index, and the event index covers the delta
-columns so reading a window is a single sequential scan.
+The treemap's cold 2 s is inherent rather than incidental: laying out a
+treemap needs the whole tree resident, so the whole tree has to be built. It
+is paid once per root and cached afterwards. Every other pane reads only the
+events inside the window, which is why they are two orders of magnitude
+faster.
 
-The Contents pane was materialising the whole tree a *second* time just to
-learn each child's size at the start of the window; it now derives that from
-the size at the end minus the window's own events, which is the invariant the
-store is built on. The stacked area was reconstructing each band's starting
-total with a recursive walk of every descendant — a million rows, nine times
-per request — and does the same thing now instead. Both also built a
-`path_id -> parent_id` map of the entire root on every request; they climb
-from the few hundred events in the window instead.
-
-What remains is the treemap's 2 s, and that one is real: a treemap has to lay
-out the whole tree, so the whole tree has to be resident. It is paid once per
-root and cached after.
+The row to know about is the third. A root's **first** scan emits one event
+per entity — 1,463,512 on a real Nextcloud volume — so any window containing
+it has to account for every one of them. Widen a window far enough back and
+that is the cost you are paying; it is bounded, but it is not the 0.012 s
+case.
 
 **Memory scales with entities** — roughly 180 bytes each plus allocator
 overhead, so ~250 MB for 500k and ~1 GB for 2.3M. The snapshot cache is
