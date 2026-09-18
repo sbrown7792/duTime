@@ -64,6 +64,17 @@
         <h2>Space used over time</h2>
         <p class="sub" id="usedSub">How the tracked tree has grown.</p>
       </figcaption>
+      <div class="rowctl">
+        <div class="seg" role="group" aria-label="Vertical scale">
+          <span>Scale</span>
+          <div>
+            <button data-used="fit" class="on"
+                    title="Fit the axis to the range in this window — shows the shape of the change, however small it is against the total">Changes</button>
+            <button data-used="fs"
+                    title="Zero to the size of the filesystem — shows how much room is left, at the cost of flattening the change">Filesystem</button>
+          </div>
+        </div>
+      </div>
       <div class="plot" id="usedChart"></div>
     </figure>
 

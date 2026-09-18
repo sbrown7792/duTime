@@ -11,6 +11,30 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.7 — 2026-09-18
+
+- **The used-space chart's vertical scale is now a choice.** 0.5.6 fitted the
+  axis to the range in the window, which answers "what did this window do"
+  and is the better default — but it is not the only question, and the other
+  one ("how much room is left") wants the opposite axis. A **Scale** control
+  offers both: *Changes* fits to the range, *Filesystem* runs zero to the
+  size of the disk.
+
+  Under *Filesystem* the gridlines are quarters of the disk rather than
+  binary boundaries: the ceiling has to be the real size for height to mean
+  fullness, and rounding it up to the next power of two would put the top
+  gridline somewhere the disk does not reach. Left to itself the chart
+  divided the range and then added the ceiling as a stub, printing "745.1
+  GiB" directly beneath "823.9 GiB".
+
+  The caption states which scale is in force, the filled area returns under
+  *Filesystem* because that axis really does start at zero, and the choice
+  is remembered per browser and travels in the permalink — "the disk is
+  filling" and "here is what moved this week" are different claims, and a
+  link should arrive making the one that was sent. A root whose filesystem
+  size was never recorded falls back to fitting rather than drawing an axis
+  to an unknown ceiling.
+
 ## 0.5.6 — 2026-09-18
 
 - **"Space used over time" is scaled to what it is showing.** The axis ran

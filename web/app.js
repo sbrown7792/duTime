@@ -27,6 +27,11 @@ const state = {
   /// on one scale from zero. Remembered per browser, since which question you
   /// are asking tends to be a habit rather than a per-visit decision.
   sparkScale: localStorage.getItem('dutime.sparkScale') || 'relative',
+  /// 'fit' scales the used-space chart to the range in the window; 'fs' runs
+  /// it from zero to the size of the filesystem. Two different questions —
+  /// "what did this week do" and "how much room is left" — and which one you
+  /// are asking is a habit, so it is remembered per browser.
+  usedScale: localStorage.getItem('dutime.usedScale') || 'fit',
   dir: 'gainers',
   collapse: true,
   view: 'overview',
@@ -513,7 +518,20 @@ async function loadOverview() {
     if (y < lo) lo = y;
     if (y > hi) hi = y;
   }
-  const band = binaryBand(lo, hi);
+  // Against the filesystem, the question is how much room is left, so the
+  // axis is the disk: zero to its size, whatever that does to the shape of
+  // the line. Falls back to fitting when the size was never recorded, rather
+  // than drawing an axis to an unknown ceiling.
+  const wantFs = state.usedScale === 'fs' && total > 0;
+  // Quarters of the disk, not binary boundaries. The ceiling has to be the
+  // real size for the height to mean "how full", and rounding it up to the
+  // next power of two would put the top gridline somewhere the disk does
+  // not reach. Left to itself ECharts divides the range on its own and then
+  // adds the ceiling as a stub tick, giving "745.1 GiB" directly under
+  // "823.9 GiB"; quartering it lands every gridline on a share of the disk.
+  const band = wantFs
+    ? { min: 0, max: total, interval: total / 4 }
+    : binaryBand(lo, hi);
   Object.assign(opt.yAxis, band);
   // A filled area measures from the baseline, so it only tells the truth
   // when the baseline is zero. Once the axis is fitted to the data the fill
@@ -545,9 +563,13 @@ async function loadOverview() {
       : `${shown.toLocaleString()} samples in this window`
         + (shown < o.scans ? ` of ${o.scans.toLocaleString()} recorded` : '')
         + `, since ${fmtTime(o.history[0][0])}.`
-        // An axis that does not start at zero must say so, or the height of
-        // the line reads as a proportion of nothing in particular.
-        + (zeroBased ? '' : ' The scale is fitted to the range shown, not to zero.');
+        // Say which scale is in force: an axis that does not start at zero
+        // must say so, or the height of the line reads as a proportion of
+        // nothing in particular — and one that runs to the filesystem should
+        // say that too, so a line that looks flat is not read as stalled.
+        + (wantFs
+          ? ` Scaled to the whole ${fmtSize(total)} filesystem.`
+          : zeroBased ? '' : ' The scale is fitted to the range shown, not to zero.');
 
   // A scan that could not read part of the tree reports a total that is too
   // low, and a shortfall that is never mentioned is indistinguishable from a
@@ -1127,6 +1149,7 @@ async function loadListing() {
   });
 
   $$('[data-spark]').forEach((b) => b.classList.toggle('on', b.dataset.spark === state.sparkScale));
+  $$('[data-used]').forEach((b) => b.classList.toggle('on', b.dataset.used === state.usedScale));
 
   $$('#listing th.sortable').forEach((th) => th.addEventListener('click', () => {
     const k = th.dataset.sort;
@@ -1348,6 +1371,11 @@ function syncHash() {
   if (state.view === 'explorer' && state.sparkScale !== 'relative') {
     p.set('spark', state.sparkScale);
   }
+  // Likewise: "the disk is filling" and "here is what moved this week" are
+  // different claims, and a link should arrive making the one that was sent.
+  if (state.view === 'overview' && state.usedScale !== 'fit') {
+    p.set('used', state.usedScale);
+  }
   if (state.view === 'compare') {
     // A comparison is the thing most worth sharing: "look at what happened
     // between these two moments" is the whole point of the view.
@@ -1367,6 +1395,7 @@ function readHash() {
   if (p.get('window')) state.window = p.get('window');
   if (p.get('metric')) state.metric = p.get('metric');
   if (['relative', 'absolute'].includes(p.get('spark'))) state.sparkScale = p.get('spark');
+  if (['fit', 'fs'].includes(p.get('used'))) state.usedScale = p.get('used');
   state.diffFrom = p.get('from');
   state.diffTo = p.get('to');
 }
@@ -1408,6 +1437,16 @@ async function init() {
     state.metric = b.dataset.metric;
     $$('.seg [data-metric]').forEach((x) => x.classList.toggle('on', x === b));
     refresh();
+  }));
+
+  $$('.seg [data-used]').forEach((b) => b.addEventListener('click', () => {
+    state.usedScale = b.dataset.used;
+    try { localStorage.setItem('dutime.usedScale', state.usedScale); } catch { /* private mode */ }
+    $$('.seg [data-used]').forEach((x) => x.classList.toggle('on', x === b));
+    // A drawing decision, not a different question for the server; the chart
+    // is built in one pass, so redraw it. Only when it is on screen.
+    if (state.view === 'overview') loadOverview();
+    syncHash();
   }));
 
   $$('.seg [data-spark]').forEach((b) => b.addEventListener('click', () => {
@@ -1544,6 +1583,8 @@ async function boot() {
     wsel.value = state.window;
     $$('.seg [data-metric]').forEach((b) =>
       b.classList.toggle('on', b.dataset.metric === state.metric));
+    $$('.seg [data-used]').forEach((b) =>
+      b.classList.toggle('on', b.dataset.used === state.usedScale));
     $$('.seg [data-spark]').forEach((b) =>
       b.classList.toggle('on', b.dataset.spark === state.sparkScale));
     switchView(state.view);
