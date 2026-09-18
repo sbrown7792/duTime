@@ -382,6 +382,47 @@ function binaryAxis(maxValue) {
   return { max: Math.ceil(maxValue / interval) * interval, interval };
 }
 
+/** Fit a value axis to the band the data actually occupies.
+ *
+ * A zero-based axis is right for anything whose area encodes magnitude, and
+ * wrong for a trend line over a large, slowly-moving total: 94.55 TiB to
+ * 94.75 TiB drawn from zero is a flat line pinned near the top of the frame,
+ * which says neither how full the disk is nor what the week did. Measured on
+ * four real roots, the window span was 1.2%, 0.2%, 100% and 0.0% of the
+ * maximum — so no fixed ceiling, the filesystem size included, suits them
+ * all. The axis is fitted to the data instead, and the tick labels carry the
+ * absolute values that the height no longer does.
+ *
+ * A line that never moves gets a band invented around it, so it sits in the
+ * middle reading as "flat" rather than collapsing to a zero-height axis or
+ * being pinned to the frame.
+ */
+function binaryBand(lo, hi) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > 0)) return {};
+  let span = hi - lo;
+  if (span <= 0) {
+    span = Math.max(hi * 0.02, 1);
+    [lo, hi] = [hi - span, hi + span];
+  } else {
+    const pad = span * 0.12;
+    [lo, hi] = [lo - pad, hi + pad];
+  }
+  lo = Math.max(lo, 0);
+  span = hi - lo;
+
+  let unit = 1;
+  while (span / unit >= 1024 && unit < 1024 ** 5) unit *= 1024;
+  if (span / unit < 4 && unit > 1) unit /= 1024;
+  const steps = [1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 50, 64, 100, 128, 200, 256, 512, 1024];
+  const step = steps.find((x) => x >= (span / unit) / 4) ?? 1024;
+  const interval = step * unit;
+  return {
+    min: Math.floor(lo / interval) * interval,
+    max: Math.ceil(hi / interval) * interval,
+    interval,
+  };
+}
+
 /** Shared ECharts chrome: hairline grid, recessive axes, muted ink. */
 function baseOption() {
   return {
@@ -464,12 +505,26 @@ async function loadOverview() {
   const pts = o.history.map(([t, b]) => [t * 1000, b]);
   const opt = baseOption();
   opt.grid.top = 26;
-  Object.assign(opt.yAxis, binaryAxis(Math.max(...pts.map((p) => p[1]), 0)));
+  // Folded rather than spread: `history` is every scan in the window with no
+  // cap, so `Math.min(...ys)` would pass one argument per scan and blow the
+  // call stack on a long window of frequent scans.
+  let lo = Infinity, hi = -Infinity;
+  for (const [, y] of pts) {
+    if (y < lo) lo = y;
+    if (y > hi) hi = y;
+  }
+  const band = binaryBand(lo, hi);
+  Object.assign(opt.yAxis, band);
+  // A filled area measures from the baseline, so it only tells the truth
+  // when the baseline is zero. Once the axis is fitted to the data the fill
+  // would overstate every value by whatever was cut off the bottom, so the
+  // series becomes a plain line.
+  const zeroBased = !(band.min > 0);
   opt.series = [{
     type: 'line', name: 'Tracked size', data: pts,
     showSymbol: false, symbolSize: 8,
     lineStyle: { width: 2, color: cssVar('--s1') },
-    areaStyle: { color: cssVar('--s1'), opacity: 0.10 },
+    areaStyle: zeroBased ? { color: cssVar('--s1'), opacity: 0.10 } : undefined,
     emphasis: { focus: 'series' },
   }];
   opt.tooltip.formatter = (ps) => {
@@ -489,7 +544,10 @@ async function loadOverview() {
         + ` ${o.scans.toLocaleString()} recorded in all, since ${fmtTime(o.first_scan.at)}.`
       : `${shown.toLocaleString()} samples in this window`
         + (shown < o.scans ? ` of ${o.scans.toLocaleString()} recorded` : '')
-        + `, since ${fmtTime(o.history[0][0])}.`;
+        + `, since ${fmtTime(o.history[0][0])}.`
+        // An axis that does not start at zero must say so, or the height of
+        // the line reads as a proportion of nothing in particular.
+        + (zeroBased ? '' : ' The scale is fitted to the range shown, not to zero.');
 
   // A scan that could not read part of the tree reports a total that is too
   // low, and a shortfall that is never mentioned is indistinguishable from a

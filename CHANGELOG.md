@@ -11,6 +11,35 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.6 — 2026-09-18
+
+- **"Space used over time" is scaled to what it is showing.** The axis ran
+  from zero to a rounded maximum, which for a large and slowly-moving total
+  draws a flat line pinned near the top of the frame — saying neither how
+  full the disk is nor what the window did.
+
+  A fixed ceiling does not fix it either. Measured across four real roots,
+  the window span was 1.2%, 0.2%, 100% and 0.0% of the maximum, and the
+  tracked size was 50%, 91%, 31% and 20% of its filesystem — so scaling to
+  the filesystem leaves the 91% root just as flat, only higher up, and a
+  min-to-max scale is degenerate on the root that never moves at all. The
+  axis is now fitted to the range in the window, on binary tick boundaries;
+  a series that never moves gets a band invented around it so it sits mid
+  height and reads as flat; and a range that reaches zero on its own stays
+  zero-based. On those four roots the line went from occupying 0.2–1.2% of
+  the chart height to 58–64%.
+
+  The filled area is dropped whenever the axis does not start at zero, since
+  a fill measures from the baseline and would overstate every value by
+  whatever was cut off the bottom, and the caption says the scale is fitted.
+  The stacked composition chart is untouched: stacked areas must start at
+  zero.
+
+- Finding the range no longer spreads the whole history into `Math.min`.
+  `history` is every scan in the window, uncapped, so a long window of
+  frequent scans passed one argument per scan and would overflow the call
+  stack.
+
 ## 0.5.5 — 2026-09-18
 
 - **The deepest colour means the most movement in both themes.** Dark mode
