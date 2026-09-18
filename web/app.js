@@ -745,15 +745,20 @@ async function loadTreemap() {
   renderCrumbs();
 
   const ramp = depthColors();
-  const paint = (node, d) => {
-    const color = node.kind === 'other' || node.kind === 'own'
-      ? cssVar('--s-other')
-      : ramp[Math.min(d, ramp.length - 1)];
+  // `⟨other⟩` and the own-files bucket stand for many entries at once, so they
+  // get no path: inventing one would name a directory that does not exist.
+  const synthetic = (k) => k === 'other' || k === 'own';
+  const paint = (node, d, path) => {
+    const color = synthetic(node.kind) ? cssVar('--s-other') : ramp[Math.min(d, ramp.length - 1)];
     const out = {
       name: node.name, value: node.value, itemStyle: { color },
       _kind: node.kind, _files: node.files, _lossy: node.lossy,
+      _path: synthetic(node.kind) ? null : path,
     };
-    if (node.children) out.children = node.children.map((c) => paint(c, d + 1));
+    if (node.children) {
+      out.children = node.children.map((c) =>
+        paint(c, d + 1, synthetic(c.kind) ? null : joinPath(path, [c.name])));
+    }
     return out;
   };
 
@@ -765,10 +770,15 @@ async function loadTreemap() {
       backgroundColor: cssVar('--surface-1'),
       borderColor: cssVar('--border'),
       textStyle: { color: cssVar('--text-primary'), fontSize: 12 },
-      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;',
+      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;'
+        + 'max-width:440px;white-space:normal;word-break:break-all;',
+      // Hovering is how you find out which one of four `config` directories
+      // you are looking at, so it names the whole path. The synthesised
+      // buckets keep their own label, having no path to give.
       formatter: (p) => {
+        if (!p.data) return '';
         const files = p.data._files != null ? `<br><span style="color:${cssVar('--text-muted')}">${p.data._files.toLocaleString()} files</span>` : '';
-        return `<b>${escapeHtml(p.name)}</b><br>${fmtSize(p.value)}${files}`;
+        return `<b>${escapeHtml(p.data._path ?? p.name)}</b><br>${fmtSize(p.value)}${files}`;
       },
     },
     series: [{
@@ -796,7 +806,9 @@ async function loadTreemap() {
         { itemStyle: { gapWidth: 1 } },
         { itemStyle: { gapWidth: 1 } },
       ],
-      data: (t.node.children || [t.node]).map((n) => paint(n, 1)),
+      data: t.node.children
+        ? t.node.children.map((n) => paint(n, 1, joinPath(t.path.name, [n.name])))
+        : [paint(t.node, 1, t.path.name)],
     }],
   }, true);
 
@@ -1282,7 +1294,10 @@ async function loadDiff() {
   } catch (e) { if (isCurrent(gen)) toast(e.message); return; }
   if (!isCurrent(gen)) return;
 
-  const paint = (n) => {
+  // The full path is threaded down rather than rebuilt from the tile's
+  // ancestry at hover time: the displayed name carries a " (deleted)" suffix,
+  // which reassembling a path from labels would splice into the middle of it.
+  const paint = (n, path) => {
     const o = {
       // Area is max(before, after) so a deleted directory still occupies the
       // space it used to, instead of silently vanishing from the picture.
@@ -1290,6 +1305,7 @@ async function loadDiff() {
       value: n.value,
       itemStyle: { color: divergingColor(n.delta, n.before) },
       _delta: n.delta, _before: n.before, _after: n.after, _gone: n.gone,
+      _path: path,
     };
     // A tile that did not move is scale, not an answer. It is drawn so the
     // things that did move can be read against something, and naming it
@@ -1299,7 +1315,7 @@ async function loadDiff() {
     // arbitrary handful of unchanged directories were labelled and the rest
     // were not. Their names are still a hover away.
     if (!n.delta) o.label = { show: false };
-    if (n.children) o.children = n.children.map(paint);
+    if (n.children) o.children = n.children.map((c) => paint(c, joinPath(path, [c.name])));
     return o;
   };
 
@@ -1310,11 +1326,24 @@ async function loadDiff() {
       backgroundColor: cssVar('--surface-1'),
       borderColor: cssVar('--border'),
       textStyle: { color: cssVar('--text-primary'), fontSize: 12 },
-      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;',
-      formatter: (p) => `<b>${escapeHtml(p.name)}</b>`
+      // A path is long and has nowhere to wrap on its own, so let it break
+      // and cap the width, rather than let one deep tile stretch the tooltip
+      // off the side of the chart.
+      extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.16);border-radius:8px;'
+        + 'max-width:440px;white-space:normal;word-break:break-all;',
+      // The whole path, not the leaf name. Two tiles named `movie.mkv` in
+      // different directories are the common case in a media tree, and the
+      // name alone cannot tell you which one grew — which is the only thing
+      // the hover is there to answer.
+      // A treemap's outermost container is drawn behind the tiles and is
+      // hoverable wherever they do not reach — measured: 7 of 59 points
+      // along one sweep of the plot. It holds none of these fields, so it
+      // was answering with "NaN B -> NaN B" under a blank name.
+      formatter: (p) => (!p.data || p.data._before == null ? '' :
+        `<b>${escapeHtml(p.data._path ?? p.name)}</b>`
         + (p.data._gone ? ' <span style="opacity:.7">(deleted)</span>' : '')
         + `<br>${fmtSize(p.data._before)} → ${fmtSize(p.data._after)}<br>`
-        + `<b>${fmtDelta(p.data._delta)}</b>`,
+        + `<b>${fmtDelta(p.data._delta)}</b>`),
     },
     series: [{
       type: 'treemap',
@@ -1330,7 +1359,11 @@ async function loadDiff() {
       },
       labelLayout: labelIfItFits,
 
-      data: (d.node.children || [d.node]).map(paint),
+      // The node being compared is `d.path`; the tiles are its children, so
+      // each starts one segment below it. A leaf root is that path itself.
+      data: d.node.children
+        ? d.node.children.map((c) => paint(c, joinPath(d.path.name, [c.name])))
+        : [paint(d.node, d.path.name)],
     }],
   }, true);
   hideCrampedUpperLabels(chart('diffmap'));

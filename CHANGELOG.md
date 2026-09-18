@@ -11,6 +11,28 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.8 — 2026-09-18
+
+- **Hovering a block names the whole path.** Both treemaps — Compare and the
+  Explorer's Blocks — showed only the leaf name, which in a tree of media or
+  of per-application config directories is the one thing that cannot identify
+  anything: `movie.mkv` and `config` occur hundreds of times, and telling
+  which one grew is the only reason to hover in the first place.
+
+  The path is threaded down as the tiles are built rather than reassembled
+  from the hovered tile's ancestry, because the displayed name of a deleted
+  entry carries a `(deleted)` suffix that reassembly would splice into the
+  middle of the path. The synthesised buckets — `⟨other⟩` and the own-files
+  row — keep their own label and are given no path, since inventing one would
+  name a directory that does not exist. Long paths wrap inside a capped
+  tooltip instead of stretching it off the side of the chart.
+
+- **The container tile stops answering `NaN B → NaN B`.** A treemap's
+  outermost node is drawn behind the tiles and is hoverable wherever they do
+  not reach — 7 of 59 points along one horizontal sweep of a real chart. It
+  holds none of a tile's fields, so it produced a tooltip with a blank name
+  and NaN for every figure. It now produces nothing.
+
 ## 0.5.7 — 2026-09-18
 
 - **The used-space chart's vertical scale is now a choice.** 0.5.6 fitted the
