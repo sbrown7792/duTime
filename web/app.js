@@ -708,11 +708,7 @@ async function loadTreemap() {
         show: true, fontSize: 11, color: '#fff', overflow: 'truncate',
         formatter: (p) => (p.value > 0 ? `${p.name}\n${fmtSize(p.value)}` : p.name),
       },
-      labelLayout: (p) => ({
-        // Anti-pattern guard: never render a label clipped by its own tile.
-        // Tiny leaves keep their colour and their tooltip; the text goes.
-        fontSize: p.rect && (p.rect.width < 54 || p.rect.height < 20) ? 0 : 11,
-      }),
+      labelLayout: labelIfItFits,
 
       levels: [
         { itemStyle: { borderWidth: 0, gapWidth: 2 } },
@@ -1093,6 +1089,99 @@ async function loadListing() {
  * from the middle, and every tile carries a signed label, so the reading
  * survives greyscale printing and colour blindness alike.
  */
+/** Label a tile only when the whole label fits inside it.
+ *
+ * A tile sized for "The_Black..." says less than an unlabelled tile does: it
+ * costs a glance to read and yields nothing, and several hundred of them is
+ * the clutter that hides the few tiles worth looking at. The previous guard
+ * was a size threshold, which cannot know how long the text is — every tile
+ * past 54px got a label and then had it cut to whatever fitted, down to a
+ * single letter.
+ *
+ * `labelRect` is the text measured before truncation, so this is a fit test
+ * rather than a guess at how many characters will survive. It also covers
+ * the bands drawn above parent tiles, which had no guard at all and produced
+ * most of the single-letter noise.
+ *
+ * Nothing is lost by staying silent: the tile keeps its colour, its area and
+ * its tooltip.
+ */
+/** Measure text in the font the charts actually draw in. */
+const measureLabel = (() => {
+  const c = document.createElement('canvas').getContext('2d');
+  return (text, font) => {
+    c.font = font;
+    return c.measureText(text).width;
+  };
+})();
+
+const TREEMAP_FONT = '11px system-ui, -apple-system, "Segoe UI", sans-serif';
+
+/** Blank the band above a parent tile when its name will not fit inside it.
+ *
+ * ECharts routes leaf labels through `labelLayout`, where the fit test
+ * lives, but not the bands above tiles that have children — measured on a
+ * real chart, 180 of its 190 nodes reached `labelLayout` and the ten it
+ * skipped were exactly the ones with children. Those bands went on showing
+ * the first few characters of a name over a tile too narrow to hold it,
+ * which is most of what makes a deep treemap look like noise.
+ *
+ * Tile geometry only exists once a layout has run, so this measures the
+ * drawn chart and then re-renders with the offending bands blanked. Hiding
+ * a label cannot change the layout, so it settles in a single extra pass.
+ *
+ * Reaching into the laid-out tree is the only way to learn a tile's width;
+ * it is wrapped so that if a future ECharts moves it, the chart simply
+ * keeps the labels it already has instead of failing to draw.
+ */
+function hideCrampedUpperLabels(chart) {
+  let root;
+  try {
+    root = chart.getModel().getSeriesByIndex(0).getData().tree.root;
+  } catch (e) {
+    return;
+  }
+  if (!root) return;
+
+  // Keyed by `dataIndex` rather than by name or by path: names repeat across
+  // a tree, and a path assembled here has to agree exactly with the one the
+  // formatter is handed, down to whether the unnamed root counts as a
+  // segment. The index is the one identifier both sides already share.
+  const cramped = new Set();
+  const walk = (node) => {
+    const kids = node.children || [];
+    if (kids.length) {
+      const box = node.getLayout && node.getLayout();
+      if (box && measureLabel(node.name, TREEMAP_FONT) + 16 > box.width) {
+        cramped.add(node.dataIndex);
+      }
+    }
+    kids.forEach(walk);
+  };
+  walk(root);
+  if (!cramped.size) return;
+
+  chart.setOption({
+    series: [{
+      upperLabel: {
+        formatter: (p) => (cramped.has(p.dataIndex) ? '' : p.name),
+      },
+    }],
+  });
+}
+
+function labelIfItFits(p) {
+  const r = p.rect, l = p.labelRect;
+  // The margin is wider than it looks like it needs to be on purpose.
+  // ECharts decides to truncate using its own internal padding, so a label
+  // clearing the tile by a hair is still cut by the renderer — measured:
+  // "The_Blacklist" at 71.9px in an 80.2px tile came out as "The_Black...".
+  // Leaving a real gutter keeps this test and the renderer agreeing, which
+  // is what stops an ellipsis appearing at all.
+  const fits = r && l && l.width + 16 <= r.width && l.height + 8 <= r.height;
+  return { fontSize: fits ? 11 : 0 };
+}
+
 function divergingColor(delta, before) {
   if (delta === 0) return cssVar('--d0');
   const base = Math.max(before, Math.abs(delta), 1);
@@ -1121,6 +1210,14 @@ async function loadDiff() {
       itemStyle: { color: divergingColor(n.delta, n.before) },
       _delta: n.delta, _before: n.before, _after: n.after, _gone: n.gone,
     };
+    // A tile that did not move is scale, not an answer. It is drawn so the
+    // things that did move can be read against something, and naming it
+    // spends attention on the one tile the view is certain is not what you
+    // came for. Worse, which of them got named came down to nothing but the
+    // length of the name: "FBI" fitted where "The_Blacklist" did not, so an
+    // arbitrary handful of unchanged directories were labelled and the rest
+    // were not. Their names are still a hover away.
+    if (!n.delta) o.label = { show: false };
     if (n.children) o.children = n.children.map(paint);
     return o;
   };
@@ -1150,15 +1247,12 @@ async function loadDiff() {
         // only thing saying which way a tile moved.
         formatter: (p) => (p.data._delta ? `${p.name}\n${fmtDelta(p.data._delta)}` : p.name),
       },
-      labelLayout: (p) => ({
-        // Anti-pattern guard: never render a label clipped by its own tile.
-        // Tiny leaves keep their colour and their tooltip; the text goes.
-        fontSize: p.rect && (p.rect.width < 54 || p.rect.height < 20) ? 0 : 11,
-      }),
+      labelLayout: labelIfItFits,
 
       data: (d.node.children || [d.node]).map(paint),
     }],
   }, true);
+  hideCrampedUpperLabels(chart('diffmap'));
   });
 }
 

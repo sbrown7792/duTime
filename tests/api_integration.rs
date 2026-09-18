@@ -764,6 +764,141 @@ async fn a_deleted_directory_reports_no_counts() {
     assert!(live["files"].is_i64(), "a live directory must report counts: {live}");
 }
 
+/// A diff must not draw the parts of the tree that did not change.
+///
+/// A media library is almost entirely static between two scans: a seven-day
+/// diff of one returned 41,620 rectangles of which 41,486 had a delta of
+/// exactly zero, so the hundred that had moved were invisible among them and
+/// the response was 7.5 MB. A subtree with no movement anywhere inside it
+/// carries no diff information at all, by definition, so it is drawn as one
+/// tile at its own size instead of being opened up.
+#[tokio::test]
+async fn a_diff_collapses_subtrees_where_nothing_moved() {
+    let mut f = Fixture::new();
+    // Two shows that never change, with enough depth to bury anything.
+    for show in ["quiet_a", "quiet_b"] {
+        for season in ["s1", "s2"] {
+            for ep in ["e1", "e2", "e3"] {
+                f.write(&format!("tv/{show}/{season}/{ep}.mkv"), 2 << 20);
+            }
+        }
+    }
+    // One show that does.
+    for season in ["s1", "s2"] {
+        for ep in ["e1", "e2", "e3"] {
+            f.write(&format!("tv/loud/{season}/{ep}.mkv"), 2 << 20);
+        }
+    }
+    f.snapshot();
+    f.write("tv/loud/s2/e3.mkv", 40 << 20); // the only movement in the tree
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let scans = get(&state, "/api/v1/scans?limit=100").await;
+    let ids: Vec<i64> =
+        scans["scans"].as_array().unwrap().iter().map(|s| s["scan_id"].as_i64().unwrap()).collect();
+    let (s1, s2) = (ids[0], ids[ids.len() - 1]);
+    let d = get(
+        &state,
+        &format!(
+            "/api/v1/diff?path={}&from=scan:{s1}&to=scan:{s2}&depth=6&limit=300",
+            enc(&root)
+        ),
+    )
+    .await;
+
+    fn find<'a>(n: &'a Value, name: &str) -> Option<&'a Value> {
+        if n["name"] == name {
+            return Some(n);
+        }
+        n["children"].as_array()?.iter().find_map(|c| find(c, name))
+    }
+    fn count(n: &Value) -> usize {
+        1 + n["children"].as_array().map_or(0, |cs| cs.iter().map(count).sum())
+    }
+
+    let node = &d["node"];
+
+    // The show that changed is opened all the way down to the file, because
+    // naming the file is the entire point of the view.
+    let loud = find(node, "loud").expect("the show that changed is missing");
+    assert!(
+        find(loud, "e3.mkv").is_some(),
+        "the diff stopped short of the file that moved: {loud:#}"
+    );
+
+    // The shows that did not change are single tiles, still carrying their
+    // size, and saying that detail was withheld rather than looking empty.
+    for quiet in ["quiet_a", "quiet_b"] {
+        let q = find(node, quiet).unwrap_or_else(|| panic!("{quiet} vanished from the diff"));
+        assert!(q["children"].is_null(), "{quiet} did not change but was opened up: {q:#}");
+        assert!(q["collapsed"].is_i64(), "{quiet} was collapsed without saying so: {q:#}");
+        assert!(q["value"].as_i64().unwrap() > 0, "{quiet} lost its area: {q:#}");
+    }
+
+    // Twelve static episodes across two shows are not drawn at all.
+    assert!(
+        count(node) < 14,
+        "the diff still draws the static half of the tree: {} tiles",
+        count(node)
+    );
+}
+
+/// The change must survive truncation, even when it is the smallest thing.
+///
+/// Children were ranked by size alone and cut at `limit`, so a directory
+/// whose largest children are all static hid its movement behind them. On a
+/// real library `Movies` had moved 48 GB while its 300 largest children had
+/// moved nothing between them — the answer was off the end of the list. Once
+/// unmoved subtrees collapse, that becomes an outright false statement: a
+/// tile reporting "nothing inside here moved" on the strength of a look that
+/// never reached the thing that did.
+#[tokio::test]
+async fn a_small_change_outranks_large_static_siblings() {
+    let mut f = Fixture::new();
+    // More static children than the diff will draw, every one of them larger
+    // than the thing that actually moves.
+    for i in 0..60 {
+        f.write(&format!("movies/big{i:03}/feature.mkv"), 8 << 20);
+    }
+    f.write("movies/little/clip.mkv", 1 << 20);
+    f.snapshot();
+    f.write("movies/little/clip.mkv", 3 << 20); // the only movement
+    f.snapshot();
+
+    let (state, root) = f.finish();
+    let scans = get(&state, "/api/v1/scans?limit=100").await;
+    let ids: Vec<i64> =
+        scans["scans"].as_array().unwrap().iter().map(|s| s["scan_id"].as_i64().unwrap()).collect();
+    let (s1, s2) = (ids[0], ids[ids.len() - 1]);
+
+    // A limit far below the number of siblings, so ranking is what decides.
+    let d = get(
+        &state,
+        &format!(
+            "/api/v1/diff?path={}&from=scan:{s1}&to=scan:{s2}&depth=6&limit=10",
+            enc(&root)
+        ),
+    )
+    .await;
+
+    fn find<'a>(n: &'a Value, name: &str) -> Option<&'a Value> {
+        if n["name"] == name {
+            return Some(n);
+        }
+        n["children"].as_array()?.iter().find_map(|c| find(c, name))
+    }
+
+    let movies = find(&d["node"], "movies").expect("movies is missing");
+    assert!(
+        movies["children"].is_array(),
+        "the directory that moved was collapsed as static: {movies:#}"
+    );
+    let little = find(movies, "little")
+        .expect("the one child that moved was cut in favour of larger static siblings");
+    assert_eq!(little["delta"], serde_json::json!(2 << 20));
+}
+
 /// Something deleted before the window began must not reappear.
 #[tokio::test]
 async fn a_deletion_outside_the_window_is_not_listed() {

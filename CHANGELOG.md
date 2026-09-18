@@ -11,6 +11,49 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.5 — 2026-09-18
+
+- **The deepest colour means the most movement in both themes.** Dark mode
+  re-stepped the diverging ramp so its *lightest* steps sat at the extremes,
+  on the reasoning that light carries furthest on a dark ground. It also
+  meant the same reading had to be learned twice, and inverted between them.
+  The dark ramp now runs the same way as the light one — deepest and most
+  saturated at the ends, neutral receding into the page — using hues already
+  tuned for a dark background rather than importing near-black navy. The
+  glyph inks were recomputed against the new steps; every pair clears 4.5:1.
+
+- **A comparison no longer draws the parts of the tree that did not change.**
+  A seven-day diff of a media library returned **41,620 rectangles, of which
+  41,486 — 99.7% — had a delta of exactly zero**, in a 7.5 MB response. The
+  hundred-odd tiles that had actually moved were lost in it. A subtree with
+  no movement anywhere inside it holds no diff information by definition, so
+  it is now drawn as a single tile at its own size and says how much detail
+  it is standing in for. On that library: 41,620 tiles to 1,232, and 7.5 MB
+  to 239 KB.
+
+- **The change outranks the bulk.** Children were kept by size and cut at the
+  limit, so a directory whose largest children are all static hid its
+  movement behind them: `Movies` had moved 48 GB while its 300 largest
+  children had moved nothing between them — the answer was off the end of the
+  list, and collapsing then reported it as "nothing moved here", which was
+  never checked. Anything that moved now sorts ahead of everything that did
+  not.
+
+- **A tile is named only when its whole name fits, and never when it did not
+  move.** The old rule was a size threshold, which cannot know how long a
+  name is: every tile past 54px was labelled and then cut to whatever fitted,
+  down to a single letter — the field of `H`, `T`, `Jo` stubs that made a
+  deep treemap look like static. Labels are now placed by measuring the text
+  against the tile. The bands above parent tiles are measured too: ECharts
+  does not route them through the hook the fit test lives in, so they are
+  checked against the drawn layout in a second pass.
+
+  Unchanged tiles are no longer labelled at all. They are there to give the
+  moved ones something to be read against, and which of them got a name came
+  down to nothing but its length — `FBI` fitted where `The_Blacklist` did
+  not. The result reads like WinDirStat with a diff over it: blocks for the
+  bulk, names on the parents and on what actually moved.
+
 ## 0.5.4 — 2026-09-17
 
 - **A comparison can no longer run backwards.** Nothing stopped "to" being

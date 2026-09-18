@@ -30,9 +30,9 @@
   --d0: #f0efec;
   --u1: #f0a3a3; --u2: #d03b3b; --u3: #8c1f1f;
   /* Ink for a glyph sitting on each step. Stated per theme rather than
-     derived from the step number: the ramp is re-stepped for dark, not
-     flipped, so "3 is the dark end" is only true in light. Every pair below
-     clears 4.5:1 against its own background. */
+     derived from the step number: the dark ramp reuses hues tuned for a dark
+     ground, so the same step number is a different colour there even though
+     it carries the same meaning. Every pair below clears 4.5:1. */
   --d3-ink: #ffffff; --d2-ink: #ffffff; --d1-ink: #0b0b0b;
   --d0-ink: #0b0b0b;
   --u1-ink: #0b0b0b; --u2-ink: #ffffff; --u3-ink: #ffffff;
@@ -50,12 +50,12 @@
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
     --o1: #b7d3f6; --o2: #86b6ef; --o3: #5598e7; --o4: #3987e5; --o5: #256abf;
-    --d3: #9ec5f4; --d2: #3987e5; --d1: #1c5cab;
+    --d3: #1c5cab; --d2: #3987e5; --d1: #9ec5f4;
     --d0: #383835;
-    --u1: #8c1f1f; --u2: #d03b3b; --u3: #e89a9a;
-    --d3-ink: #0b0b0b; --d2-ink: #0b0b0b; --d1-ink: #ffffff;
+    --u1: #e89a9a; --u2: #d03b3b; --u3: #8c1f1f;
+    --d3-ink: #ffffff; --d2-ink: #0b0b0b; --d1-ink: #0b0b0b;
     --d0-ink: #ffffff;
-    --u1-ink: #ffffff; --u2-ink: #ffffff; --u3-ink: #0b0b0b;
+    --u1-ink: #0b0b0b; --u2-ink: #ffffff; --u3-ink: #ffffff;
     --success-text: #0ca30c;
   }
 }
@@ -67,12 +67,12 @@
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
   --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
   --o1: #b7d3f6; --o2: #86b6ef; --o3: #5598e7; --o4: #3987e5; --o5: #256abf;
-  --d3: #9ec5f4; --d2: #3987e5; --d1: #1c5cab;
+  --d3: #1c5cab; --d2: #3987e5; --d1: #9ec5f4;
   --d0: #383835;
-  --u1: #8c1f1f; --u2: #d03b3b; --u3: #e89a9a;
-  --d3-ink: #0b0b0b; --d2-ink: #0b0b0b; --d1-ink: #ffffff;
+  --u1: #e89a9a; --u2: #d03b3b; --u3: #8c1f1f;
+  --d3-ink: #ffffff; --d2-ink: #0b0b0b; --d1-ink: #0b0b0b;
   --d0-ink: #ffffff;
-  --u1-ink: #ffffff; --u2-ink: #ffffff; --u3-ink: #0b0b0b;
+  --u1-ink: #0b0b0b; --u2-ink: #ffffff; --u3-ink: #ffffff;
   --success-text: #0ca30c;
 }
 
