@@ -584,7 +584,10 @@ async function loadOverview() {
        </div>`
     : '';
 
-  await loadGainers('#gainTable', 8);
+  // Fixed, not inherited: this pane is titled "Biggest gainers" and says it
+  // counts a directory's own files, so that is what it asks for whatever the
+  // Changes tab happens to be set to.
+  await loadGainers('#gainTable', 8, { losers: false, mode: 'exclusive', collapse: true });
   });
 }
 
@@ -614,21 +617,35 @@ function forecastTile(f) {
 
 // ── gainers table ──────────────────────────────────────────────────────
 
-async function loadGainers(sel, limit) {
+/** The gainers table, as asked for by whoever is asking.
+ *
+ * It appears on two views, and the direction, attribution mode and
+ * ancestor-collapsing are controls belonging to one of them. Reading those
+ * out of shared state meant the Changes tab silently re-aimed the Overview:
+ * choosing "Shrank" there left the Overview's pane listing what shrank
+ * underneath a heading reading "Biggest gainers" and a caption promising
+ * what grew the most. A control changes the view it lives in; the summary on
+ * the Overview says what it says, so it asks for that.
+ */
+async function loadGainers(sel, limit, opts) {
+  const { losers = false, mode = 'exclusive', collapse = true } = opts || {};
   // The gainers table appears on two views; mark whichever card holds it.
   const pane = sel === '#gainTable' ? '#pane-gainers' : '#pane-changes';
   return inPane(pane, async () => {
   const gen = loadGen;
   const g = await api('gainers', {
-    from: state.window, mode: state.mode,
-    limit, losers: state.dir === 'losers', collapse: state.collapse,
+    from: state.window, mode,
+    limit, losers, collapse,
   });
   if (!isCurrent(gen)) return;
-  state.lastChanges = g.results;
+  // Only the Changes table feeds the CSV export, and only it should claim
+  // that slot: the Overview's eight-row summary is a different question and
+  // must not become what an export of the full table hands over.
+  if (sel === '#changesTable') state.lastChanges = g.results;
 
   const el = $(sel);
   if (!g.results.length) {
-    el.innerHTML = `<div class="empty">Nothing ${state.dir === 'losers' ? 'shrank' : 'grew'} in this window.</div>`;
+    el.innerHTML = `<div class="empty">Nothing ${losers ? 'shrank' : 'grew'} in this window.</div>`;
   } else {
     const rows = g.results.map((r) => `
       <tr>
@@ -1378,7 +1395,11 @@ async function refresh() {
   try {
     if (state.view === 'overview') await loadOverview();
     else if (state.view === 'explorer') { await loadTreemap(); await loadListing(); await loadSeries(); }
-    else if (state.view === 'changes') await loadGainers('#changesTable', 100);
+    else if (state.view === 'changes') {
+      await loadGainers('#changesTable', 100, {
+        losers: state.dir === 'losers', mode: state.mode, collapse: state.collapse,
+      });
+    }
     else if (state.view === 'compare') await loadDiff();
   } catch (e) {
     // A 401 has an answer, so offer it rather than reporting a dead end.

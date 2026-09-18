@@ -11,6 +11,26 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.9 — 2026-09-18
+
+- **The Changes tab's controls no longer re-aim the Overview.** Choosing
+  "Shrank" there left the Overview's summary listing what shrank, underneath
+  a heading reading **Biggest gainers** and a caption promising what grew the
+  most — a chart contradicting its own title, which is the one thing a
+  diagnostic must never do.
+
+  The gainers table is drawn on both views and was reading the direction out
+  of shared state, so a control belonging to one view silently changed the
+  other. The same leak applied to the other two controls in that row:
+  *Inclusive* attribution and the ancestor-collapsing checkbox both reached
+  the Overview's pane, the first of them contradicting a caption that says it
+  counts a directory's own files. The caller now states what it wants: the
+  Overview asks for the fixed summary it advertises, the Changes tab passes
+  its controls, and each keeps its own settings.
+
+- The Overview's eight-row summary no longer overwrites what the Changes
+  tab's *Export CSV* hands over.
+
 ## 0.5.8 — 2026-09-18
 
 - **Hovering a block names the whole path.** Both treemaps — Compare and the

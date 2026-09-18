@@ -1,6 +1,6 @@
 [package]
 name = "dutime"
-version = "0.5.8"
+version = "0.5.9"
 edition = "2024"
 build = "build.rs"
 description = "Track disk usage over time"
