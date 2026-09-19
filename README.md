@@ -17,6 +17,28 @@ change. The 700 MB download that was deleted is still visible, in blue, at the
 size it used to be — a point-in-time `du` today cannot tell you it ever
 existed.*
 
+## Contents
+
+- [Why not an existing tool?](#why-not-an-existing-tool) — what the gap is
+
+**Running it**
+- [Install and deploy](#install-and-deploy) — build, `dutime install`, copying to a server
+- [Configuration](#configuration) — roots, intervals, exclusions
+  - [Protecting sensitive roots](#protecting-sensitive-roots) — a token per root, so a guest sees growth without contents
+  - [Reading directories duTime does not own](#reading-directories-dutime-does-not-own) — capabilities, and why NFS is different
+- [How it works](#how-it-works) — the short version
+- [Troubleshooting](#troubleshooting) — the page will not load, a root is slow to open
+
+**Using it**
+- [The web UI](#the-web-ui) — Overview, Explorer, Changes, Compare
+- [The command line](#the-command-line) — `top`, `du --at`, `diff`, `doctor`
+
+**Going deeper**
+- [How duTime works](docs/design.md) — the design in full, and how the numbers are checked against `du`
+- [Choosing the store](docs/storage.md) — why SQLite and not a columnar or time-series engine
+
+[Status](#status) · [License](#license)
+
 ## Why not an existing tool?
 
 | Tool | Gap |
@@ -28,7 +50,7 @@ existed.*
 | Prometheus dirsize exporters + Grafana | A time-series database has no notion of hierarchy, so subtree aggregation — the whole point — is impossible, and 100k directories as label values is a cardinality explosion |
 | TreeSize (Windows, paid) | Can compare two snapshots, but is not a service and not Linux |
 
-## Getting started
+## Install and deploy
 
 ```console
 $ cargo build --release
@@ -88,198 +110,6 @@ Not by editing `listen` in the config afterwards. The unit ships with
 starts cleanly, reports itself listening, holds a port that `ss` confirms is
 open — and drops every packet from the network. `--listen` writes both halves.
 See [Troubleshooting](#troubleshooting) if you have already hit this.
-
-## The command line
-
-The CLI is not an afterthought to the web UI — it is what you script against,
-and it answers the question on its own.
-
-```console
-$ dutime top --since 7d
-what grew in the last 7d (exclusive mode)
-
-  +308.0 MiB  /srv/app/target/release/artifact.bin
-   +89.4 MiB  /var/cache/pkg
-    +5.0 MiB  /home/alice/Pictures/day13.jpg
-
-$ dutime top --since 7d --losers
-what shrank in the last 7d (exclusive mode)
-
-  -700.0 MiB  /home/alice/Downloads/distro.iso
-
-$ dutime du /srv --at -3d
-1.1 GiB	/srv
-
-$ dutime doctor
-sqlite integrity_check       ok
-current_size consistency     ok (/home/steven)
-reconstruction               ok (recorded 485003831571, fast 485003831571, replay 485003831571)
-in-memory snapshot           ok (127501 entities, loaded in 150 ms)
-no problems found
-```
-
-`top` has two modes. **Exclusive** names the directory whose *own* files grew,
-which points straight at the culprit. **Inclusive** rolls growth up the
-ancestor chain, and by default hides any directory whose growth is entirely
-explained by one child — otherwise a single new file reports itself nine times,
-once for every directory above it.
-
-## The web UI
-
-**Overview** — capacity, the tracked tree over time, biggest gainers, and a
-days-to-full projection that refuses to guess until it has a real window to
-extrapolate from. The window control moves the chart and the gainers table
-together; the projection ignores it, being fitted to every sample there is
-rather than to whichever span you are looking at.
-
-The used-space chart's vertical scale is a choice, because there are two
-questions and they want opposite axes. **Changes** fits the axis to the range
-in the window, so 200 GB of movement on a 95 TB volume is a visible slope
-rather than a flat line pinned near the top. **Filesystem** runs from zero to
-the size of the disk and answers how much room is left instead, with the
-gridlines at quarters of the disk. The caption always says which one is in
-force, and the filled area appears only under an axis that really does start
-at zero.
-
-![Overview](docs/overview.png)
-
-**Explorer** — three panes over one directory, in the order you read them:
-what is in it, how it got that way, and where the bulk sits.
-
-**Contents** is a sortable listing of everything in the directory with a
-**trend sparkline beside each row**, so you can see which of thirty siblings
-is the one creeping up before deciding which to open. A directory with more
-entries than the listing can show keeps **everything that moved** and fills
-the rest with the largest, because the entry worth seeing is rarely the
-biggest one.
-
-**Anything deleted inside the window is listed too**, struck through, with the
-trend that explains it. A directory whose trend spikes and returns to baseline
-usually did so because something inside it was created and then removed — and
-that something is, by definition, absent from the directory as it now stands.
-A deleted row shows the peak it reached rather than a size, since it no longer
-has one.
-
-A name that is deleted and recreated — a SQLite write-ahead log, say — stays
-**one row**, with the gaps showing as the zero-byte periods they were. The
-store records each generation separately, because a location that is emptied
-and refilled is not the same bytes; the listing adds them back together,
-because "is this path growing" is the question being asked. The row says how
-many times the name has been recreated, which is itself worth knowing.
-
-The **Trend scale** control decides what the sparklines are drawn against.
-Both scales measure *movement*, and differ only in whose movement sets the
-height — every row is drawn from its own low point, because the Size column
-already answers how big a directory is.
-
-*Per row* gives each row the full height of its own cell and shows **shape**:
-a directory quietly doubling from 40 MB looks as dramatic as one adding
-400 GB, which is the point when you are hunting for something starting to run
-away.
-
-*Shared* takes the largest movement on the page, so that row fills its cell
-top to bottom and everything else is drawn to the same ruler — a row that
-moved a tenth as much is a tenth as tall. On a volume holding a static 400 GB
-archive and a log growing by 21 GB, the log fills the cell and the archive is
-a flat rule; an axis anchored at zero would instead render that growth as a
-5% wiggle near the top and bury the one row that mattered.
-
-The swing is peak-to-trough rather than first-to-last, and has to be: a
-directory that gained 700 GB and gave it back nets zero but still needs the
-vertical room, and a scale that ignored it would clip the line out of the
-cell. The choice is remembered and travels in the permalink.
-
-**Composition** is the same directory decomposed into its largest children as
-a stacked area, so you can see which child a rise belongs to rather than only
-that the total rose.
-
-**Blocks** is a WinDirStat-style treemap with a time slider: drag it and the
-same tree redraws as it stood at that moment. The slider applies to this pane
-alone — the two above it always show the present.
-
-Each pane reports its own progress. They finish at different times, and a
-single page-wide spinner that clears when the last one lands tells you
-nothing about which is still working.
-
-![Explorer](docs/explorer.png)
-
-**Changes** — biggest gainers and losers over any window, exclusive or
-inclusive, exportable as CSV.
-
-**Compare** — the diff treemap at the top of this page. Pick two moments:
-area is the larger of the two sizes, so something deleted still shows at the
-scale it mattered, and colour is the change.
-
-Most of a large tree is unchanged, and drawing it buries what is not: a week
-of a real media library produced 41,620 rectangles of which 41,486 — 99.7% —
-had a delta of exactly zero. A subtree with no movement anywhere inside it
-holds no diff information by definition, so it is drawn as a single tile at
-its own size instead of being opened up. When the list of children has to be
-cut, **what moved outranks what is merely big**, so the change cannot fall
-off the end behind larger static siblings — measured on that library, one
-directory had moved 48 GB while its 300 largest children had moved nothing
-between them.
-
-Tiles carry a name only where the whole name fits and only where something
-moved; everything else is a plain block. Hovering any tile — here or in the
-Explorer's Blocks pane — names its **full path**, which in a tree holding a
-hundred files called `movie.mkv` is the only thing that identifies it.
-
-Every view is linkable: the URL carries the path, window and comparison, so you
-can paste exactly what you are looking at into a ticket. A status line at the
-foot of the page names the build that is answering, when that binary was
-built, and how much disk the database is using — a tool that reports on disk
-usage should say what it costs.
-
-## How it works
-
-A scheduled walk, a change-only event log, and an in-memory rollup.
-
-**Change-only storage.** A row means "this entity's size became X at this
-scan"; no row means unchanged. On a live 448 GiB home directory with 884k
-files, the baseline snapshot is 127,496 entities in a 20 MB database and every
-scan after it records **2–10 events**.
-
-**Exclusive sizes, inclusive by rollup.** Mean directory depth is ~9.3, so
-storing inclusive sizes would dirty ~9.3 rows per single file write. Storing
-exclusive sizes dirties one, and the rollup that recovers inclusive values is
-an in-memory pointer walk.
-
-**SQLite, deliberately.** At a few hundred MB a year, the columnar and
-server-based options solve a problem that does not exist while charging real
-operational cost — and a time-series database cannot do subtree aggregation at
-all. See [docs/storage.md](docs/storage.md) for the full comparison.
-
-**Both size metrics, always.** Apparent (`st_size`) and allocated
-(`st_blocks × 512`) are tracked separately everywhere. Their divergence is
-signal: sparse VM images have far fewer blocks than bytes, and a pile of tiny
-files has more blocks than bytes from per-file tail slack.
-
-## Correctness
-
-duTime's numbers are only worth anything if you can check them, so the test
-suite pins them to `du` byte for byte — including hardlinks, sparse files,
-symlinks, non-UTF-8 filenames, and files straddling the tracking threshold.
-
-Verified against a real 11 GB `/usr`: apparent and allocated totals both match
-`du` exactly. `dutime doctor` cross-checks three independent implementations of
-history reconstruction — the fast checkpoint+delta path, a naive full replay,
-and the in-memory rollup — against the value recorded at scan time.
-
-```console
-$ cargo test
-```
-
-Two things `du` does that are surprising, and that duTime replicates because
-being checkable matters more than being tidy:
-
-- `du --apparent-size` does **not** count a directory's own `st_size`, while
-  allocated `du` **does** count its `st_blocks`.
-- `du -a` omits de-duplicated hardlinks from its listing entirely.
-
-Where duTime deviates, it does so on purpose: hardlink de-duplication credits
-the lowest-sorting path rather than whichever link the walk reached first, so
-two scans of an unchanged tree agree instead of inventing growth.
 
 ## Configuration
 
@@ -447,6 +277,35 @@ naming the paths, and the Overview carries a banner. Partial scans still
 appear in history: the totals are an underestimate, but the same paths
 usually fail every time, so the trend remains meaningful.
 
+## How it works
+
+A scheduled walk, a change-only event log, and an in-memory rollup.
+
+duTime writes a row only when an entity's size **changes**; no row means
+unchanged. On a live 448 GiB home directory with 884k files the baseline
+snapshot is 127,496 entities in a 20 MB database, and every scan after it
+records **2–10 events**. That is the difference between a year of history
+costing a few hundred MB and costing a few hundred GB.
+
+Sizes are stored **exclusive** — a directory's own files — and rolled up to
+inclusive totals in memory when asked. At a mean directory depth of ~9.3,
+storing them inclusive would dirty nine rows for every single-file write.
+
+Apparent (`st_size`) and allocated (`st_blocks × 512`) are both recorded
+everywhere, and where they diverge that is signal: sparse VM images have far
+fewer blocks than bytes, a pile of tiny files has more blocks than bytes.
+
+**The numbers are checkable**, which for a measuring tool is the whole of it.
+The test suite pins duTime's totals to `du` byte for byte — hardlinks, sparse
+files, symlinks, non-UTF-8 filenames and files straddling the tracking
+threshold included — and `dutime doctor` cross-checks three independent
+implementations of history reconstruction against the value recorded at scan
+time.
+
+The store is SQLite, deliberately. The full reasoning, the correctness
+argument in detail, and the storage-engine comparison are in
+[docs/design.md](docs/design.md) and [docs/storage.md](docs/storage.md).
+
 ## Troubleshooting
 
 ### The service is running but the page just spins
@@ -530,6 +389,148 @@ It should not block. The walk and the commit both run off the request threads,
 and reads come from a pool of connections separate from the writer. Worst-case
 API latency during a scan is ~160 ms. If you see seconds, open an issue with
 `dutime doctor` output.
+
+## The web UI
+
+**Overview** — capacity, the tracked tree over time, biggest gainers, and a
+days-to-full projection that refuses to guess until it has a real window to
+extrapolate from. The window control moves the chart and the gainers table
+together; the projection ignores it, being fitted to every sample there is
+rather than to whichever span you are looking at.
+
+The used-space chart's vertical scale is a choice, because there are two
+questions and they want opposite axes. **Changes** fits the axis to the range
+in the window, so 200 GB of movement on a 95 TB volume is a visible slope
+rather than a flat line pinned near the top. **Filesystem** runs from zero to
+the size of the disk and answers how much room is left instead, with the
+gridlines at quarters of the disk. The caption always says which one is in
+force, and the filled area appears only under an axis that really does start
+at zero.
+
+![Overview](docs/overview.png)
+
+**Explorer** — three panes over one directory, in the order you read them:
+what is in it, how it got that way, and where the bulk sits.
+
+**Contents** is a sortable listing of everything in the directory with a
+**trend sparkline beside each row**, so you can see which of thirty siblings
+is the one creeping up before deciding which to open. A directory with more
+entries than the listing can show keeps **everything that moved** and fills
+the rest with the largest, because the entry worth seeing is rarely the
+biggest one.
+
+**Anything deleted inside the window is listed too**, struck through, with the
+trend that explains it. A directory whose trend spikes and returns to baseline
+usually did so because something inside it was created and then removed — and
+that something is, by definition, absent from the directory as it now stands.
+A deleted row shows the peak it reached rather than a size, since it no longer
+has one.
+
+A name that is deleted and recreated — a SQLite write-ahead log, say — stays
+**one row**, with the gaps showing as the zero-byte periods they were. The
+store records each generation separately, because a location that is emptied
+and refilled is not the same bytes; the listing adds them back together,
+because "is this path growing" is the question being asked. The row says how
+many times the name has been recreated, which is itself worth knowing.
+
+The **Trend scale** control decides what the sparklines are drawn against.
+Both scales measure *movement*, and differ only in whose movement sets the
+height — every row is drawn from its own low point, because the Size column
+already answers how big a directory is.
+
+*Per row* gives each row the full height of its own cell and shows **shape**:
+a directory quietly doubling from 40 MB looks as dramatic as one adding
+400 GB, which is the point when you are hunting for something starting to run
+away.
+
+*Shared* takes the largest movement on the page, so that row fills its cell
+top to bottom and everything else is drawn to the same ruler — a row that
+moved a tenth as much is a tenth as tall. On a volume holding a static 400 GB
+archive and a log growing by 21 GB, the log fills the cell and the archive is
+a flat rule; an axis anchored at zero would instead render that growth as a
+5% wiggle near the top and bury the one row that mattered.
+
+The swing is peak-to-trough rather than first-to-last, and has to be: a
+directory that gained 700 GB and gave it back nets zero but still needs the
+vertical room, and a scale that ignored it would clip the line out of the
+cell. The choice is remembered and travels in the permalink.
+
+**Composition** is the same directory decomposed into its largest children as
+a stacked area, so you can see which child a rise belongs to rather than only
+that the total rose.
+
+**Blocks** is a WinDirStat-style treemap with a time slider: drag it and the
+same tree redraws as it stood at that moment. The slider applies to this pane
+alone — the two above it always show the present.
+
+Each pane reports its own progress. They finish at different times, and a
+single page-wide spinner that clears when the last one lands tells you
+nothing about which is still working.
+
+![Explorer](docs/explorer.png)
+
+**Changes** — biggest gainers and losers over any window, exclusive or
+inclusive, exportable as CSV.
+
+**Compare** — the diff treemap at the top of this page. Pick two moments:
+area is the larger of the two sizes, so something deleted still shows at the
+scale it mattered, and colour is the change.
+
+Most of a large tree is unchanged, and drawing it buries what is not: a week
+of a real media library produced 41,620 rectangles of which 41,486 — 99.7% —
+had a delta of exactly zero. A subtree with no movement anywhere inside it
+holds no diff information by definition, so it is drawn as a single tile at
+its own size instead of being opened up. When the list of children has to be
+cut, **what moved outranks what is merely big**, so the change cannot fall
+off the end behind larger static siblings — measured on that library, one
+directory had moved 48 GB while its 300 largest children had moved nothing
+between them.
+
+Tiles carry a name only where the whole name fits and only where something
+moved; everything else is a plain block. Hovering any tile — here or in the
+Explorer's Blocks pane — names its **full path**, which in a tree holding a
+hundred files called `movie.mkv` is the only thing that identifies it.
+
+Every view is linkable: the URL carries the path, window and comparison, so you
+can paste exactly what you are looking at into a ticket. A status line at the
+foot of the page names the build that is answering, when that binary was
+built, and how much disk the database is using — a tool that reports on disk
+usage should say what it costs.
+
+## The command line
+
+The CLI is not an afterthought to the web UI — it is what you script against,
+and it answers the question on its own.
+
+```console
+$ dutime top --since 7d
+what grew in the last 7d (exclusive mode)
+
+  +308.0 MiB  /srv/app/target/release/artifact.bin
+   +89.4 MiB  /var/cache/pkg
+    +5.0 MiB  /home/alice/Pictures/day13.jpg
+
+$ dutime top --since 7d --losers
+what shrank in the last 7d (exclusive mode)
+
+  -700.0 MiB  /home/alice/Downloads/distro.iso
+
+$ dutime du /srv --at -3d
+1.1 GiB	/srv
+
+$ dutime doctor
+sqlite integrity_check       ok
+current_size consistency     ok (/home/steven)
+reconstruction               ok (recorded 485003831571, fast 485003831571, replay 485003831571)
+in-memory snapshot           ok (127501 entities, loaded in 150 ms)
+no problems found
+```
+
+`top` has two modes. **Exclusive** names the directory whose *own* files grew,
+which points straight at the culprit. **Inclusive** rolls growth up the
+ancestor chain, and by default hides any directory whose growth is entirely
+explained by one child — otherwise a single new file reports itself nine times,
+once for every directory above it.
 
 ## Status
 
