@@ -79,14 +79,28 @@ never as root, and scores 1.7 on `systemd-analyze security`.
 
 ### Deploying to another machine
 
-There is no package yet, so it is build-then-copy:
+Download the binary from [Releases][rel] — one statically linked `x86_64`
+executable, no runtime and no glibc floor, so it runs on anything with a
+Linux kernel:
+
+```console
+$ curl -sSLO https://github.com/sbrown7792/duTime/releases/latest/download/dutime-x86_64-unknown-linux-musl.tar.gz
+$ tar xzf dutime-*.tar.gz
+$ sudo install -m755 dutime-*/dutime /usr/bin/dutime
+$ dutime --version
+dutime 0.5.10 (782ce50a1f 2026-09-18)
+```
+
+[rel]: https://github.com/sbrown7792/duTime/releases
+
+Or build it yourself and copy it over — a release build takes about two
+minutes and needs a Rust toolchain plus a C compiler:
 
 ```console
 $ cargo build --release                            # on a build machine
 $ scp target/release/dutime yourserver:/tmp/
 $ ssh yourserver 'sudo install -m755 /tmp/dutime /usr/bin/dutime'
 $ ssh yourserver 'dutime --version'
-dutime 0.2.0 (037585ceba 2026-09-11)
 ```
 
 **Check that last line.** `--version` carries the version, the commit and the
@@ -98,9 +112,10 @@ having been run without `--release` while `--release` is what gets copied —
 the stale binary starts, serves, and behaves exactly like the old one,
 because it is the old one.
 
-The binary is dynamically linked and needs a glibc at least as new as the
-build machine's (currently 2.39 — Ubuntu 24.04 or later). Copying from a
-newer distro to an older one fails at exec with a version error.
+A binary you build yourself is **dynamically linked**, and needs a glibc at
+least as new as the build machine's. Copying one from a newer distro to an
+older one fails at exec with a version error, which is why the published
+release is built against musl instead — that one has no such floor.
 
 **To serve the network, say so at install time:**
 

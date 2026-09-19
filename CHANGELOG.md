@@ -11,6 +11,42 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.10 — 2026-09-18
+
+- **Releases now ship a binary.** Tagging builds a statically linked
+  `x86_64-unknown-linux-musl` executable and attaches it to the GitHub
+  release, so deploying is a download rather than installing a Rust toolchain
+  on the machine whose disk is filling up. The asset name carries no version,
+  so `releases/latest/download/…` is a URL that keeps working.
+
+  One target, on purpose. A glibc-linked binary inherits the build host's
+  glibc version as a floor and simply fails to exec on anything older —
+  Debian 12, an older Ubuntu LTS, most NAS firmware. For a tool whose
+  distribution story is "copy it to your server", that is a hard failure
+  rather than a slow path, and no second target avoids it.
+
+- **duTime brings its own allocator.** Rust calls whatever `malloc` the
+  platform provides, so the parallel walk — a path buffer per directory
+  entry, 211k of them on a 10 GiB `/usr`, across four threads — ran at the
+  mercy of the libc it happened to be linked against. Median of five
+  interleaved runs on that tree:
+
+  | build | scan |
+  |---|---|
+  | glibc + system allocator | 0.78 s |
+  | glibc + mimalloc | 0.68 s |
+  | musl + system allocator | 1.65 s |
+  | musl + mimalloc | 0.85 s |
+
+  musl's malloc is written for size and simplicity rather than concurrent
+  throughput, and that 2.1× was the price of a portable binary. It is not any
+  more. glibc gains 13% from the same change, so a build you make yourself is
+  faster too.
+
+  The binary is not stripped: symbols cost 458 KB compressed and buy 12,889
+  named functions in a panic backtrace, which is the difference between
+  diagnosing a crash on someone's NAS and not.
+
 ## 0.5.9 — 2026-09-18
 
 - **The Changes tab's controls no longer re-aim the Overview.** Choosing

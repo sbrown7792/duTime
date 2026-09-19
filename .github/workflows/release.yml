@@ -1,0 +1,94 @@
+# Build the release binary and attach it to the GitHub release.
+#
+# One target, deliberately: x86_64-unknown-linux-musl, statically linked. A
+# glibc-linked binary carries the build host's glibc version as a floor and
+# will not start on a distro older than the runner — which, for a tool whose
+# distribution story is "copy it to your server", is a hard failure rather
+# than a slow path. The static build runs on anything with a Linux kernel.
+#
+# musl's allocator is far slower than glibc's under the parallel walk, so the
+# binary sets mimalloc as its global allocator; see src/main.rs. If that ever
+# gets removed, this target regresses the scan by roughly 2x.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # build.rs stamps the commit and its date into --version.
+      - name: Fetch enough history for the build stamp
+        run: git fetch --deepen=1 --quiet || true
+
+      - name: Install the musl toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      # The binary ships whether or not anyone remembered to run these.
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      # The entire reason for choosing this target. If a dependency ever
+      # drags in a dynamic link, fail here rather than shipping a binary
+      # that dies on the machines this exists to serve.
+      - name: Assert the binary is static
+        run: |
+          BIN=target/x86_64-unknown-linux-musl/release/dutime
+          file "$BIN"
+          if ! file "$BIN" | grep -q 'statically linked'; then
+            echo "::error::$BIN is not statically linked"
+            exit 1
+          fi
+          "$BIN" --version
+
+      # The asset name carries no version, so
+      # releases/latest/download/<asset> is a URL that keeps working. The
+      # directory inside the tarball is versioned, so two downloads never
+      # unpack over each other.
+      - name: Package
+        id: package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIR="dutime-${VERSION}-x86_64-unknown-linux-musl"
+          ASSET="dutime-x86_64-unknown-linux-musl.tar.gz"
+          mkdir -p "dist/$DIR"
+          cp target/x86_64-unknown-linux-musl/release/dutime "dist/$DIR/"
+          cp README.md CHANGELOG.md LICENSE "dist/$DIR/"
+          tar -C dist -czf "dist/$ASSET" "$DIR"
+          (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSET='${{ steps.package.outputs.asset }}'
+          DIR='${{ steps.package.outputs.dir }}'
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Statically linked \`x86_64\` Linux binary — no runtime, no glibc floor, runs on anything with a Linux kernel.
+
+          \`\`\`console
+          \$ curl -sSLO https://github.com/${{ github.repository }}/releases/latest/download/$ASSET
+          \$ tar xzf $ASSET
+          \$ sudo install -m755 $DIR/dutime /usr/bin/dutime
+          \$ sudo dutime install --system --listen 0.0.0.0:8471
+          \`\`\`
+
+          What changed: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$GITHUB_REF_NAME/CHANGELOG.md)." \
+            "dist/$ASSET" \
+            "dist/$ASSET.sha256"
