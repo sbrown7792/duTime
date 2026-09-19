@@ -122,10 +122,11 @@ warm cache; the first walk after a reboot has to fault in a gigabyte of
 dentries and inodes and will be far slower. Measure a cold scan on the machine
 in question before turning the interval down.
 
-Exclusions use gitignore syntax, but duTime deliberately never reads
-`.gitignore` files off disk — `target/` and `node_modules/` are precisely what
-you are trying to find. A leading `#` is taken literally rather than as a
-comment, so a Synology share's `#recycle/` excludes what it says it does.
+Exclusions are written in gitignore syntax, but duTime borrows the syntax
+only: it never reads `.gitignore` files off disk, because `target/` and
+`node_modules/` are exactly what you want to see when a disk fills up. One
+rule is deliberately different — a leading `#` is part of the pattern, not the
+start of a comment — so a Synology share's `#recycle/` works as written.
 
 **Tracking several directories** means several `[[root]]` blocks. The name in
 brackets is a fixed field name, not a label you choose, so `[[media]]` is
