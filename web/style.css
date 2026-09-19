@@ -160,6 +160,19 @@ button.ghost:hover, button.icon:hover { color: var(--text-primary); }
   padding: 10px 14px; cursor: pointer;
 }
 .tabs button.on { color: var(--text-primary); border-bottom-color: var(--s1); font-weight: 560; }
+/* Pushed to the end of the row, and set apart from the named views: this one
+   is about the server rather than about the disk. `auto` margin rather than
+   a spacer element so it still lands correctly when the row wraps on a
+   narrow screen. */
+.tabs .gear {
+  margin-left: auto;
+  font-size: 16px;
+  line-height: 1;
+  padding: 8px 12px 9px;
+  color: var(--text-muted);
+}
+.tabs .gear:hover { color: var(--text-primary); }
+.tabs .gear.on { color: var(--s1); }
 
 main { padding: 22px; max-width: 1400px; margin: 0 auto; }
 .view { display: none; }
@@ -306,9 +319,13 @@ tr:last-child td { border-bottom: none; }
 /* The diagnostics tables have no name column to absorb the slack, so a fixed
    layout splits six columns evenly and leaves a wide gutter beside each
    number. Size these to their contents instead. */
-.listing.diag table { table-layout: auto; }
+.listing.diag table { table-layout: auto; min-width: 100%; }
 .listing.diag td, .listing.diag th { white-space: nowrap; }
 .listing.diag td .detail { white-space: normal; }
+/* Six unwrappable columns do not fit a phone. The table scrolls inside its
+   own box rather than widening the document: a page that scrolls sideways
+   moves the header and every other pane along with it. */
+.listing.diag { overflow-x: auto; }
 .listing th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .listing th.sortable:hover { color: var(--text-secondary); }
 .listing th.sortable[aria-sort]::after { content: " \2191"; font-size: 10px; }

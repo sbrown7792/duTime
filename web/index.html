@@ -49,6 +49,9 @@
   <button role="tab" data-view="explorer">Explorer</button>
   <button role="tab" data-view="changes">Changes</button>
   <button role="tab" data-view="compare">Compare</button>
+  <button role="tab" data-view="diagnostics" class="gear"
+          title="Diagnostics — scans in flight, schedules and failures"
+          aria-label="Diagnostics">&#9881;</button>
 </nav>
 
 <p id="busyMsg" class="sr-only" role="status" aria-live="polite"></p>
@@ -199,10 +202,11 @@
     </div>
   </section>
 
-  <!-- Operator view. Deliberately absent from the tab bar: it answers
-       "what is this server doing", which is a question you arrive at
-       knowing, not one to put in front of everyone looking at a disk
-       chart. Reached at #view=diagnostics. -->
+  <!-- Operator view. Reached by the gear at the end of the tab row, or
+       directly at #view=diagnostics. Set apart from the named tabs rather
+       than hidden: it answers "what is this server doing", which is a
+       different question from any of the others, but one worth being able
+       to find without knowing the URL. -->
   <section id="view-diagnostics" class="view">
     <div id="diagServer" class="tiles"></div>
     <div id="diagAccess"></div>

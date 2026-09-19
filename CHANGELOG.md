@@ -11,6 +11,24 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.12 — 2026-09-19
+
+- **A gear at the end of the tab row opens the diagnostics page.** It was
+  reachable only by typing `#view=diagnostics`, which meant only the person
+  who wrote it could find it. Set apart from the named views rather than
+  hidden: it asks a different question from the other four, but not one you
+  should need a URL to ask.
+
+  Its table scrolls inside its own box on a narrow screen. Six columns that
+  cannot wrap do not fit a phone, and letting them widen the document would
+  drag the header and every other pane sideways with them.
+
+- **Releases carry the tarball under both names.** The versioned one —
+  `dutime-0.5.12-x86_64-unknown-linux-musl.tar.gz` — is what you want in a
+  downloads folder or quoted in a bug report; the unversioned one is what
+  makes `releases/latest/download/…` a URL that documentation can hold onto.
+  Identical bytes, and one `.sha256` covering both.
+
 ## 0.5.11 — 2026-09-19
 
 - **A diagnostics page, at `#view=diagnostics`.** Not in the tab bar: it

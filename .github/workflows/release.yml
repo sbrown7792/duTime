@@ -62,29 +62,36 @@ jobs:
           fi
           "$BIN" --version
 
-      # The asset name carries no version, so
-      # releases/latest/download/<asset> is a URL that keeps working. The
-      # directory inside the tarball is versioned, so two downloads never
-      # unpack over each other.
+      # Two names for one tarball, because they answer different needs. The
+      # versioned name is what you want sitting in a downloads folder or
+      # quoted in a bug report; the unversioned one is what lets
+      # releases/latest/download/<asset> be a URL that documentation and
+      # scripts can hold onto. Identical bytes, so the checksum covers both.
       - name: Package
         id: package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           DIR="dutime-${VERSION}-x86_64-unknown-linux-musl"
-          ASSET="dutime-x86_64-unknown-linux-musl.tar.gz"
+          VERSIONED="$DIR.tar.gz"
+          LATEST="dutime-x86_64-unknown-linux-musl.tar.gz"
           mkdir -p "dist/$DIR"
           cp target/x86_64-unknown-linux-musl/release/dutime "dist/$DIR/"
           cp README.md CHANGELOG.md LICENSE "dist/$DIR/"
-          tar -C dist -czf "dist/$ASSET" "$DIR"
-          (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
-          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          tar -C dist -czf "dist/$VERSIONED" "$DIR"
+          cp "dist/$VERSIONED" "dist/$LATEST"
+          (cd dist && sha256sum "$VERSIONED" "$LATEST" > "$DIR.sha256")
+          echo "versioned=$VERSIONED" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "sums=$DIR.sha256" >> "$GITHUB_OUTPUT"
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ASSET='${{ steps.package.outputs.asset }}'
+          ASSET='${{ steps.package.outputs.latest }}'
+          VERSIONED='${{ steps.package.outputs.versioned }}'
+          SUMS='${{ steps.package.outputs.sums }}'
           DIR='${{ steps.package.outputs.dir }}'
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
@@ -93,10 +100,13 @@ jobs:
           \`\`\`console
           \$ curl -sSLO https://github.com/${{ github.repository }}/releases/latest/download/$ASSET
           \$ tar xzf $ASSET
+
+          \`$VERSIONED\` is the same tarball under a name that says which release it is.
           \$ sudo install -m755 $DIR/dutime /usr/bin/dutime
           \$ sudo dutime install --system --listen 0.0.0.0:8471
           \`\`\`
 
           What changed: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$GITHUB_REF_NAME/CHANGELOG.md)." \
+            "dist/$VERSIONED" \
             "dist/$ASSET" \
-            "dist/$ASSET.sha256"
+            "dist/$SUMS"

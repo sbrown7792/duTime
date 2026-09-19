@@ -94,6 +94,11 @@ dutime 0.5.10 (782ce50a1f 2026-09-18)
 
 [rel]: https://github.com/sbrown7792/duTime/releases
 
+Each release carries the same tarball twice: once under the name above, so
+this URL keeps working, and once as `dutime-<version>-x86_64-unknown-linux-musl.tar.gz`
+for when you want the file itself to say which release it is. The `.sha256`
+covers both.
+
 Or build it yourself and copy it over — a release build takes about two
 minutes and needs a Rust toolchain plus a C compiler:
 
@@ -443,10 +448,10 @@ once for every directory above it.
 
 ### The diagnostics page
 
-`http://your-server:8471/#view=diagnostics` — deliberately not in the tab
-bar. It answers "what is this server doing", which is a question you arrive
-at already knowing you have, rather than one to put in front of everyone
-looking at a disk chart.
+The gear at the end of the tab row, or `#view=diagnostics` directly. Set
+apart from the named views rather than hidden: it answers "what is this
+server doing", which is a different question from any of the others, but not
+one you should have to know a URL to ask.
 
 It reports the build and uptime, the database and write-ahead log sizes, the
 snapshot cache, and for each root: whether a scan is running **right now** and

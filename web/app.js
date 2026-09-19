@@ -746,7 +746,8 @@ async function loadDiagnostics() {
     ? d.roots.map((r) => diagRoot(r, now)).join('')
     : '<div class="card"><div class="empty">No roots are visible to you.</div></div>';
 
-  $('#diagFoot').textContent = `Refreshed ${fmtTime(now)} · this page is not linked from the tabs.`;
+  $('#diagFoot').textContent =
+    `Refreshed ${fmtTime(now)} · updates every few seconds while this page is open.`;
 
   diagTimer = setTimeout(() => {
     if (state.view === 'diagnostics') loadDiagnostics();
