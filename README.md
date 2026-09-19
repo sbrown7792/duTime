@@ -26,15 +26,18 @@ existed.*
 - [Configuration](#configuration) — roots, intervals, exclusions
   - [Protecting sensitive roots](#protecting-sensitive-roots) — a token per root, so a guest sees growth without contents
   - [Reading directories duTime does not own](#reading-directories-dutime-does-not-own) — capabilities, and why NFS is different
-- [How it works](#how-it-works) — the short version
-- [Troubleshooting](#troubleshooting) — the page will not load, a root is slow to open
 
 **Using it**
 - [The web UI](#the-web-ui) — Overview, Explorer, Changes, Compare
 - [The command line](#the-command-line) — `top`, `du --at`, `diff`, `doctor`
 
 **Going deeper**
-- [How duTime works](docs/design.md) — the design in full, and how the numbers are checked against `du`
+- [Troubleshooting](#troubleshooting)
+  - [The service is running but the page just spins](#the-service-is-running-but-the-page-just-spins)
+  - [A very large root is slow to open](#a-very-large-root-is-slow-to-open)
+  - [A scan is running and the UI feels slow](#a-scan-is-running-and-the-ui-feels-slow)
+- [How it works](#how-it-works) — the short version
+- [The design in full](docs/design.md) — why the store is shaped this way, and how the numbers are checked against `du`
 - [Choosing the store](docs/storage.md) — why SQLite and not a columnar or time-series engine
 
 [Status](#status) · [License](#license)
@@ -278,119 +281,6 @@ naming the paths, and the Overview carries a banner. Partial scans still
 appear in history: the totals are an underestimate, but the same paths
 usually fail every time, so the trend remains meaningful.
 
-## How it works
-
-A scheduled walk, a change-only event log, and an in-memory rollup.
-
-duTime writes a row only when an entity's size **changes**; no row means
-unchanged. On a live 448 GiB home directory with 884k files the baseline
-snapshot is 127,496 entities in a 20 MB database, and every scan after it
-records **2–10 events**. That is the difference between a year of history
-costing a few hundred MB and costing a few hundred GB.
-
-Sizes are stored **exclusive** — a directory's own files — and rolled up to
-inclusive totals in memory when asked. At a mean directory depth of ~9.3,
-storing them inclusive would dirty nine rows for every single-file write.
-
-Apparent (`st_size`) and allocated (`st_blocks × 512`) are both recorded
-everywhere, and where they diverge that is signal: sparse VM images have far
-fewer blocks than bytes, a pile of tiny files has more blocks than bytes.
-
-**The numbers are checkable**, which for a measuring tool is the whole of it.
-The test suite pins duTime's totals to `du` byte for byte — hardlinks, sparse
-files, symlinks, non-UTF-8 filenames and files straddling the tracking
-threshold included — and `dutime doctor` cross-checks three independent
-implementations of history reconstruction against the value recorded at scan
-time.
-
-The store is SQLite, deliberately. The full reasoning, the correctness
-argument in detail, and the storage-engine comparison are in
-[docs/design.md](docs/design.md) and [docs/storage.md](docs/storage.md).
-
-## Troubleshooting
-
-### The service is running but the page just spins
-
-A spinning tab that never errors means packets are being **dropped** rather
-than refused. A refusal is instant and produces a message; a drop produces
-nothing at all, which is why the logs look healthy. Ask duTime:
-
-```console
-$ sudo dutime doctor --config /etc/dutime/config.toml
-```
-
-It prints the bound address, what systemd's IP filter will actually let
-through, the result of connecting to itself, and every URL this host answers
-on. In order of how often each is the culprit:
-
-1. **`IPAddressAllow=localhost` in the unit.** The single most likely cause,
-   and duTime's own fault: the hardened unit is loopback-only, so setting
-   `listen = "0.0.0.0:8471"` in the config and nothing else leaves the filter
-   dropping everything. `doctor` reports this as a `PROBLEM` naming both
-   settings. Fix with `sudo dutime install --system --listen 0.0.0.0:8471`
-   (then `daemon-reload` and `restart`), or narrow it yourself with
-   `sudo systemctl edit dutime` and an `IPAddressAllow=192.168.0.0/16` line.
-2. **Bound to loopback.** `listen = "127.0.0.1:8471"` is the default and is
-   working as designed. Either tunnel it —
-   `ssh -N -L 8471:localhost:8471 yourserver` — or bind the network as above.
-3. **A host firewall.** `sudo ufw allow 8471/tcp`. Note that duTime's
-   self-check cannot see this one: a packet to one of this host's own
-   addresses is routed over loopback and never meets the firewall, so the
-   probe passing does not prove a remote client can connect. `doctor` says so
-   where it reports the result.
-4. **`https://` in the address bar.** duTime speaks plain HTTP. A TLS
-   handshake against a plaintext port hangs exactly like a dropped packet.
-
-To see whether requests arrive at all, turn on the access log — one line per
-request, in and out:
-
-```console
-$ sudo systemctl edit dutime      # [Service] Environment=DUTIME_ACCESS_LOG=1
-$ sudo systemctl restart dutime && journalctl -fu dutime
-```
-
-Requests logged but never answered is a different bug from no requests at all,
-and that distinction is usually the whole diagnosis. (`access_log = true` in
-the config does the same thing.)
-
-### A very large root is slow to open
-
-Scale is entity count, not disk size. Measured on a synthetic 1.3M-entity
-volume (`cargo run --release --example bench_large`), opening the Explorer
-after a root change:
-
-| pane | time |
-|---|---|
-| Blocks (treemap) | 2.0 s cold, 0.08 s warm |
-| Contents, ordinary window | 0.012 s |
-| Contents, window containing a root's first scan | 0.62 s |
-| Composition (stacked area), ditto | 0.64 s |
-
-The treemap's cold 2 s is inherent rather than incidental: laying out a
-treemap needs the whole tree resident, so the whole tree has to be built. It
-is paid once per root and cached afterwards. Every other pane reads only the
-events inside the window, which is why they are two orders of magnitude
-faster.
-
-The row to know about is the third. A root's **first** scan emits one event
-per entity — 1,463,512 on a real Nextcloud volume — so any window containing
-it has to account for every one of them. Widen a window far enough back and
-that is the cost you are paying; it is bounded, but it is not the 0.012 s
-case.
-
-**Memory scales with entities** — roughly 180 bytes each plus allocator
-overhead, so ~250 MB for 500k and ~1 GB for 2.3M. The snapshot cache is
-bounded in bytes rather than in snapshots for that reason, and the system unit
-allows 2 GB. `dutime doctor` reports the entity count if you want to size it
-down.
-
-### A scan is running and the UI feels slow
-
-It should not block. The walk and the commit both run off the request threads,
-and reads come from a pool of connections separate from the writer. Worst-case
-API latency during a scan is ~160 ms. If you see seconds, open an issue with
-`dutime doctor` output.
-
 ## The web UI
 
 **Overview** — capacity, the tracked tree over time, biggest gainers, and a
@@ -532,6 +422,119 @@ which points straight at the culprit. **Inclusive** rolls growth up the
 ancestor chain, and by default hides any directory whose growth is entirely
 explained by one child — otherwise a single new file reports itself nine times,
 once for every directory above it.
+
+## Troubleshooting
+
+### The service is running but the page just spins
+
+A spinning tab that never errors means packets are being **dropped** rather
+than refused. A refusal is instant and produces a message; a drop produces
+nothing at all, which is why the logs look healthy. Ask duTime:
+
+```console
+$ sudo dutime doctor --config /etc/dutime/config.toml
+```
+
+It prints the bound address, what systemd's IP filter will actually let
+through, the result of connecting to itself, and every URL this host answers
+on. In order of how often each is the culprit:
+
+1. **`IPAddressAllow=localhost` in the unit.** The single most likely cause,
+   and duTime's own fault: the hardened unit is loopback-only, so setting
+   `listen = "0.0.0.0:8471"` in the config and nothing else leaves the filter
+   dropping everything. `doctor` reports this as a `PROBLEM` naming both
+   settings. Fix with `sudo dutime install --system --listen 0.0.0.0:8471`
+   (then `daemon-reload` and `restart`), or narrow it yourself with
+   `sudo systemctl edit dutime` and an `IPAddressAllow=192.168.0.0/16` line.
+2. **Bound to loopback.** `listen = "127.0.0.1:8471"` is the default and is
+   working as designed. Either tunnel it —
+   `ssh -N -L 8471:localhost:8471 yourserver` — or bind the network as above.
+3. **A host firewall.** `sudo ufw allow 8471/tcp`. Note that duTime's
+   self-check cannot see this one: a packet to one of this host's own
+   addresses is routed over loopback and never meets the firewall, so the
+   probe passing does not prove a remote client can connect. `doctor` says so
+   where it reports the result.
+4. **`https://` in the address bar.** duTime speaks plain HTTP. A TLS
+   handshake against a plaintext port hangs exactly like a dropped packet.
+
+To see whether requests arrive at all, turn on the access log — one line per
+request, in and out:
+
+```console
+$ sudo systemctl edit dutime      # [Service] Environment=DUTIME_ACCESS_LOG=1
+$ sudo systemctl restart dutime && journalctl -fu dutime
+```
+
+Requests logged but never answered is a different bug from no requests at all,
+and that distinction is usually the whole diagnosis. (`access_log = true` in
+the config does the same thing.)
+
+### A very large root is slow to open
+
+Scale is entity count, not disk size. Measured on a synthetic 1.3M-entity
+volume (`cargo run --release --example bench_large`), opening the Explorer
+after a root change:
+
+| pane | time |
+|---|---|
+| Blocks (treemap) | 2.0 s cold, 0.08 s warm |
+| Contents, ordinary window | 0.012 s |
+| Contents, window containing a root's first scan | 0.62 s |
+| Composition (stacked area), ditto | 0.64 s |
+
+The treemap's cold 2 s is inherent rather than incidental: laying out a
+treemap needs the whole tree resident, so the whole tree has to be built. It
+is paid once per root and cached afterwards. Every other pane reads only the
+events inside the window, which is why they are two orders of magnitude
+faster.
+
+The row to know about is the third. A root's **first** scan emits one event
+per entity — 1,463,512 on a real Nextcloud volume — so any window containing
+it has to account for every one of them. Widen a window far enough back and
+that is the cost you are paying; it is bounded, but it is not the 0.012 s
+case.
+
+**Memory scales with entities** — roughly 180 bytes each plus allocator
+overhead, so ~250 MB for 500k and ~1 GB for 2.3M. The snapshot cache is
+bounded in bytes rather than in snapshots for that reason, and the system unit
+allows 2 GB. `dutime doctor` reports the entity count if you want to size it
+down.
+
+### A scan is running and the UI feels slow
+
+It should not block. The walk and the commit both run off the request threads,
+and reads come from a pool of connections separate from the writer. Worst-case
+API latency during a scan is ~160 ms. If you see seconds, open an issue with
+`dutime doctor` output.
+
+## How it works
+
+A scheduled walk, a change-only event log, and an in-memory rollup.
+
+duTime writes a row only when an entity's size **changes**; no row means
+unchanged. On a live 448 GiB home directory with 884k files the baseline
+snapshot is 127,496 entities in a 20 MB database, and every scan after it
+records **2–10 events**. That is the difference between a year of history
+costing a few hundred MB and costing a few hundred GB.
+
+Sizes are stored **exclusive** — a directory's own files — and rolled up to
+inclusive totals in memory when asked. At a mean directory depth of ~9.3,
+storing them inclusive would dirty nine rows for every single-file write.
+
+Apparent (`st_size`) and allocated (`st_blocks × 512`) are both recorded
+everywhere, and where they diverge that is signal: sparse VM images have far
+fewer blocks than bytes, a pile of tiny files has more blocks than bytes.
+
+**The numbers are checkable**, which for a measuring tool is the whole of it.
+The test suite pins duTime's totals to `du` byte for byte — hardlinks, sparse
+files, symlinks, non-UTF-8 filenames and files straddling the tracking
+threshold included — and `dutime doctor` cross-checks three independent
+implementations of history reconstruction against the value recorded at scan
+time.
+
+The store is SQLite, deliberately. The full reasoning, the correctness
+argument in detail, and the storage-engine comparison are in
+[docs/design.md](docs/design.md) and [docs/storage.md](docs/storage.md).
 
 ## Status
 
