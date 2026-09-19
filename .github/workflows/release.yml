@@ -44,12 +44,20 @@ jobs:
       # The entire reason for choosing this target. If a dependency ever
       # drags in a dynamic link, fail here rather than shipping a binary
       # that dies on the machines this exists to serve.
+      # Tested on both builds: the musl one has neither header, the glibc
+      # one has INTERP plus four NEEDED entries. Deliberately not matching
+      # file(1)'s wording -- it calls this binary "static-pie linked", and
+      # only ldd says "statically linked", which is how the first version of
+      # this check failed a release over a binary that was perfectly static.
       - name: Assert the binary is static
         run: |
           BIN=target/x86_64-unknown-linux-musl/release/dutime
           file "$BIN"
-          if ! file "$BIN" | grep -q 'statically linked'; then
-            echo "::error::$BIN is not statically linked"
+          INTERP=$(readelf -l "$BIN" | grep -c INTERP || true)
+          NEEDED=$(readelf -d "$BIN" 2>/dev/null | grep -c NEEDED || true)
+          if [ "$INTERP" -ne 0 ] || [ "$NEEDED" -ne 0 ]; then
+            echo "::error::$BIN links dynamically (INTERP=$INTERP NEEDED=$NEEDED)"
+            readelf -d "$BIN" || true
             exit 1
           fi
           "$BIN" --version
