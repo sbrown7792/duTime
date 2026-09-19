@@ -33,6 +33,7 @@ existed.*
 
 **Going deeper**
 - [Troubleshooting](#troubleshooting)
+  - [The diagnostics page](#the-diagnostics-page) — scans in flight, schedules, failures
   - [The service is running but the page just spins](#the-service-is-running-but-the-page-just-spins)
   - [A very large root is slow to open](#a-very-large-root-is-slow-to-open)
   - [A scan is running and the UI feels slow](#a-scan-is-running-and-the-ui-feels-slow)
@@ -439,6 +440,31 @@ explained by one child — otherwise a single new file reports itself nine times
 once for every directory above it.
 
 ## Troubleshooting
+
+### The diagnostics page
+
+`http://your-server:8471/#view=diagnostics` — deliberately not in the tab
+bar. It answers "what is this server doing", which is a question you arrive
+at already knowing you have, rather than one to put in front of everyone
+looking at a disk chart.
+
+It reports the build and uptime, the database and write-ahead log sizes, the
+snapshot cache, and for each root: whether a scan is running **right now** and
+for how long, when the next one is due, the configured interval and whether
+overruns have backed it off, and the last dozen scans with their durations,
+event counts and status. It refreshes every few seconds while open, because
+"a scan is running" is true for a few seconds at a time and a page that
+answered it once would mostly answer it wrongly.
+
+Unlike every other view, it does **not** hide scans that failed. The rest of
+the UI filters to `status IN ('ok','partial')` so a chart never plots a drop
+that never happened — but a failed scan is the reason to open this page, and
+its error text is shown verbatim rather than sending you to the journal.
+
+It respects protected roots exactly as the rest of the API does. Without the
+token you get the server's own figures and the unprotected roots; a protected
+root contributes nothing — not its path, not its schedule, not why its scans
+failed — and the page says how many roots it is not showing you.
 
 ### The service is running but the page just spins
 

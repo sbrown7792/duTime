@@ -38,6 +38,33 @@ const SNAPSHOT_CACHE_BYTES: usize = 192 << 20;
 /// makes, few enough that a burst cannot exhaust the blocking pool.
 const READERS: usize = 4;
 
+/// What the scheduler is doing right now, for one root.
+///
+/// Held in memory because the database cannot answer it: a `scan` row
+/// appears when a scan *finishes*, so "is one running, and since when" is
+/// invisible to any query. Keyed by canonical root path rather than by
+/// `root_id`, because the scheduler knows the path from configuration and
+/// the id is not assigned until a scan first commits — a root that has
+/// never completed one still has a schedule worth reporting.
+#[derive(Clone, Debug, Default)]
+pub struct RootActivity {
+    /// Epoch seconds the in-flight scan began; `None` when idle.
+    pub running_since: Option<i64>,
+    /// Epoch seconds the next scan is due, as last scheduled.
+    pub next_due: Option<i64>,
+    pub interval_s: u64,
+    /// The interval actually in use, which backoff may have widened.
+    pub effective_interval_s: u64,
+    /// Ticks dropped because the previous scan was still going.
+    pub overruns: u32,
+    pub last_started: Option<i64>,
+    pub last_walk_ms: Option<i64>,
+    /// Why the last attempt failed, if it did. Cleared by a success.
+    pub last_error: Option<String>,
+    pub scans_completed: u64,
+    pub scans_failed: u64,
+}
+
 pub struct AppState {
     /// The scanner's connection. Held only for the duration of a commit.
     pub store: Mutex<Store>,
@@ -51,6 +78,11 @@ pub struct AppState {
     /// because it is an access policy for the network API, not a property of
     /// the recorded data — the local CLI can already read the filesystem.
     protected: std::collections::HashSet<RootId>,
+    /// Live scheduler state, written by the scan loop and read by the
+    /// diagnostics endpoint.
+    activity: Mutex<std::collections::HashMap<PathBuf, RootActivity>>,
+    /// When this process started, for uptime.
+    started_at: i64,
 }
 
 /// A tiny checkout pool. Not worth a dependency: this is the whole thing.
@@ -113,6 +145,8 @@ impl AppState {
             cache: Mutex::new(Cache::default()),
             auth: crate::auth::Auth::Open,
             protected: std::collections::HashSet::new(),
+            activity: Mutex::new(std::collections::HashMap::new()),
+            started_at: crate::cli::now(),
             db_path: PathBuf::new(),
         }
     }
@@ -133,6 +167,8 @@ impl AppState {
             cache: Mutex::new(Cache::default()),
             auth: crate::auth::Auth::Open,
             protected: std::collections::HashSet::new(),
+            activity: Mutex::new(std::collections::HashMap::new()),
+            started_at: crate::cli::now(),
             db_path: path,
         })
     }
@@ -225,6 +261,25 @@ impl AppState {
 impl AppState {
     /// Snapshot cache occupancy, for diagnostics and for the tests that keep
     /// the budget honest.
+    /// Record something the scan loop just did.
+    pub fn note_activity(&self, root: &Path, f: impl FnOnce(&mut RootActivity)) {
+        let mut a = self.activity.lock().unwrap();
+        f(a.entry(root.to_path_buf()).or_default());
+    }
+
+    /// The scheduler's view of one root, if it has a scan loop at all.
+    ///
+    /// A root in the database with no entry here was scanned by something
+    /// other than this process — `dutime scan --once`, or a previous run —
+    /// which is itself worth being able to see.
+    pub fn activity_for(&self, root: &Path) -> Option<RootActivity> {
+        self.activity.lock().unwrap().get(root).cloned()
+    }
+
+    pub fn uptime_s(&self) -> i64 {
+        (crate::cli::now() - self.started_at).max(0)
+    }
+
     pub fn cache_stats(&self) -> serde_json::Value {
         let c = self.cache.lock().unwrap();
         serde_json::json!({

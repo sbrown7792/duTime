@@ -48,6 +48,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/gainers", get(gainers))
         .route("/api/v1/auth", get(auth_status))
         .route("/api/v1/cache", get(cache_status))
+        .route("/api/v1/diagnostics", get(diagnostics))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::middleware,
@@ -239,6 +240,115 @@ async fn health(State(s): State<Arc<AppState>>) -> ApiResult {
             "wal_bytes": wal,
             "repository": option_env!("CARGO_PKG_REPOSITORY").filter(|s| !s.is_empty()),
             "roots": roots.len(),
+        }))
+    })
+    .await
+}
+
+/// Operator detail: what the server is, and what the scanner is doing.
+///
+/// Deliberately does **not** filter by [`USABLE_SCAN`]. Every other endpoint
+/// hides scans that failed or aborted, because a chart built from them would
+/// report drops that never happened — but a scan that failed is the single
+/// most useful thing on this page, and hiding it here would mean the one
+/// view meant for diagnosis is the one that cannot show the fault.
+///
+/// Per-root detail is restricted to [`visible_roots`], so a protected root
+/// contributes nothing: not its path, not its schedule, not the size of the
+/// tree behind it. The count of what is hidden *is* reported, because the
+/// sign-in control already tells an anonymous visitor that protected roots
+/// exist, and a diagnostics page that quietly omits half the machine is
+/// worse than one that says how much it is not showing.
+async fn diagnostics(State(s): State<Arc<AppState>>, viewer: Viewer) -> ApiResult {
+    blocking(move || {
+        let visible = s.visible_roots(viewer)?;
+        let store = s.read();
+        let all = store.roots()?.len();
+        let (db, wal) = s.db_bytes();
+
+        let mut roots = Vec::new();
+        for (id, path) in &visible {
+            let act = s.activity_for(path);
+
+            let mut st = store.conn.prepare(
+                "SELECT scan_id, started_at, duration_ms, n_events, n_entities, n_dirs,
+                        n_files, status, err
+                 FROM scan WHERE root_id = ?1 ORDER BY scan_id DESC LIMIT 12",
+            )?;
+            let recent: Vec<Value> = st
+                .query_map([id], |r| {
+                    Ok(json!({
+                        "scan_id": r.get::<_, i64>(0)?,
+                        "at": r.get::<_, i64>(1)?,
+                        "duration_ms": r.get::<_, Option<i64>>(2)?,
+                        "events": r.get::<_, Option<i64>>(3)?,
+                        "entities": r.get::<_, Option<i64>>(4)?,
+                        "dirs": r.get::<_, Option<i64>>(5)?,
+                        "files": r.get::<_, Option<i64>>(6)?,
+                        "status": r.get::<_, String>(7)?,
+                        "err": r.get::<_, Option<String>>(8)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+
+            // Counted over every status, so a root whose scans are all
+            // failing does not report zero and look merely idle.
+            let (total, failed, first_at): (i64, i64, Option<i64>) = store.conn.query_row(
+                "SELECT COUNT(*), SUM(status NOT IN ('ok','partial')), MIN(started_at)
+                 FROM scan WHERE root_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get(2)?)),
+            )?;
+
+            let now = crate::cli::now();
+            roots.push(json!({
+                "root_id": id,
+                "path": path_json(path),
+                "protected": s.is_protected(*id),
+                "schedule": act.as_ref().map(|a| json!({
+                    "interval_s": a.interval_s,
+                    "effective_interval_s": a.effective_interval_s,
+                    // Backoff is silent otherwise: the scans simply become
+                    // less frequent and nothing says why.
+                    "backed_off": a.effective_interval_s > a.interval_s,
+                    "next_due": a.next_due,
+                    "overruns": a.overruns,
+                })),
+                "running": act.as_ref().and_then(|a| a.running_since).map(|t| json!({
+                    "since": t,
+                    "elapsed_s": (now - t).max(0),
+                })),
+                "process": act.as_ref().map(|a| json!({
+                    "scans_completed": a.scans_completed,
+                    "scans_failed": a.scans_failed,
+                    "last_attempt_at": a.last_started,
+                    "last_attempt_ms": a.last_walk_ms,
+                    "last_error": a.last_error,
+                })),
+                "scans": { "total": total, "failed": failed, "first_at": first_at },
+                "recent": recent,
+            }));
+        }
+
+        Ok(json!({
+            "server": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "build": crate::cli::VERSION,
+                "built_at": crate::cli::build_mtime(),
+                "uptime_s": s.uptime_s(),
+                "pid": std::process::id(),
+                "now": crate::cli::now(),
+                "db_bytes": db,
+                "wal_bytes": wal,
+                "cache": s.cache_stats(),
+            },
+            "access": {
+                "auth_required": s.has_protected_roots(),
+                "authenticated": viewer.authed(),
+                // What this caller is not being shown, without saying which.
+                "roots_hidden": all.saturating_sub(visible.len()),
+            },
+            "roots": roots,
         }))
     })
     .await

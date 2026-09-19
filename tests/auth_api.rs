@@ -204,3 +204,91 @@ async fn auth_status_reports_what_the_ui_needs_and_no_more() {
     let (_, v) = req(&Arc::new(open), "/api/v1/auth", None).await;
     assert_eq!(v["required"], serde_json::json!(false));
 }
+
+/// Diagnostics is an operator view, so it must leak less, not more.
+///
+/// It is the one page that reports paths, schedules, scan counts and error
+/// text all at once, which makes it the worst place to forget the per-root
+/// filter: "the scan of /mnt/nextcloud/data/steven failed" names the path,
+/// says the data exists, and hands over the error, all to someone who is not
+/// allowed to open it.
+#[tokio::test]
+async fn diagnostics_reports_nothing_about_a_protected_root() {
+    let (state, _dir, public_id, private_id) = fixture();
+
+    let (code, anon) = req(&state, "/api/v1/diagnostics", None).await;
+    assert_eq!(code, StatusCode::OK, "anonymous callers still get the server's own health");
+
+    let roots = anon["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 1, "a protected root appeared for an anonymous caller: {anon:#}");
+    assert_eq!(roots[0]["root_id"], serde_json::json!(public_id));
+
+    // The whole document, not just the roots array: schedules, error strings
+    // and recent-scan rows are all places a path could reappear.
+    let whole = anon.to_string();
+    assert!(
+        !whole.contains("holiday-photos") && !whole.contains("/priv"),
+        "the protected root's path leaked into diagnostics: {whole}"
+    );
+
+    // Saying how much is hidden is not the same as saying what.
+    assert_eq!(anon["access"]["roots_hidden"], serde_json::json!(1));
+    assert_eq!(anon["access"]["authenticated"], serde_json::json!(false));
+
+    // And with the token, the operator sees the machine.
+    let (code, authed) = req(&state, "/api/v1/diagnostics", Some(TOKEN)).await;
+    assert_eq!(code, StatusCode::OK);
+    let roots = authed["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 2, "the token did not unlock the protected root: {authed:#}");
+    assert!(
+        roots.iter().any(|r| r["root_id"] == serde_json::json!(private_id)
+            && r["protected"] == serde_json::json!(true)),
+        "the protected root is not marked as such: {authed:#}"
+    );
+    assert_eq!(authed["access"]["roots_hidden"], serde_json::json!(0));
+
+    // Server-wide figures are not per-root and are already public via
+    // /health; the page would be useless without them.
+    assert!(anon["server"]["uptime_s"].is_i64());
+    assert!(anon["server"]["build"].is_string());
+}
+
+/// A scan that failed is the reason to open this page.
+///
+/// Every other endpoint filters to `status IN ('ok','partial')`, because a
+/// chart built from a failed scan reports a drop that never happened. Here
+/// that filter would hide the fault from the one view meant to show it.
+#[tokio::test]
+async fn diagnostics_shows_scans_the_rest_of_the_api_hides() {
+    let (state, _dir, public_id, _) = fixture();
+    {
+        let store = state.store.lock().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO scan (root_id, started_at, duration_ms, status, err)
+                 VALUES (?1, ?2, 40, 'error', 'permission denied reading /x')",
+                rusqlite::params![public_id, dutime::cli::now()],
+            )
+            .unwrap();
+    }
+
+    let (_, d) = req(&state, "/api/v1/diagnostics", Some(TOKEN)).await;
+    let root = d["roots"].as_array().unwrap().iter()
+        .find(|r| r["root_id"] == serde_json::json!(public_id))
+        .unwrap();
+    let recent = root["recent"].as_array().unwrap();
+    assert!(
+        recent.iter().any(|s| s["status"] == "error"
+            && s["err"].as_str().is_some_and(|e| e.contains("permission denied"))),
+        "the failed scan is missing from diagnostics: {recent:#?}"
+    );
+    assert_eq!(root["scans"]["failed"], serde_json::json!(1), "failures are not counted");
+
+    // The contrast that makes the point: /scans still hides it.
+    let (_, listed) = req(&state, "/api/v1/scans", Some(TOKEN)).await;
+    assert!(
+        listed["scans"].as_array().unwrap().iter().all(|s| s["status"] != "error"),
+        "the charting endpoint started returning failed scans"
+    );
+}

@@ -666,6 +666,155 @@ async function loadGainers(sel, limit, opts) {
   });
 }
 
+
+// ── diagnostics ────────────────────────────────────────────────────────
+
+let diagTimer = null;
+
+/** Seconds as a short human duration: 5s, 4m 20s, 3h 07m, 6d 4h. */
+function fmtDur(sec) {
+  if (sec == null || !isFinite(sec)) return '—';
+  const s = Math.max(0, Math.round(sec));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${String(Math.floor(s / 60) % 60).padStart(2, '0')}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor(s / 3600) % 24}h`;
+}
+
+/** Milliseconds, at the precision the number deserves. */
+function fmtMs(ms) {
+  if (ms == null) return '—';
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 60000 ? 2 : 1)} s`;
+}
+
+/** The operator view: what this server is, and what the scanner is doing.
+ *
+ * Polls while it is on screen. "Is a scan running" is the question this page
+ * exists to answer and it is only true for a few seconds at a time, so a
+ * page that answered it once and went stale would mostly answer it wrongly.
+ */
+async function loadDiagnostics() {
+  const gen = loadGen;
+  let d;
+  try {
+    d = await api('diagnostics', {});
+  } catch (e) {
+    if (isCurrent(gen)) $('#diagRoots').innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if (!isCurrent(gen) || state.view !== 'diagnostics') return;
+
+  const sv = d.server;
+  const tiles = [
+    { k: 'Build', v: sv.version, m: sv.build },
+    { k: 'Uptime', v: fmtDur(sv.uptime_s), m: `pid ${sv.pid} · built ${escapeHtml(sv.built_at || '—')}` },
+    {
+      k: 'Database', v: fmtSize(sv.db_bytes),
+      m: `${fmtSize(sv.wal_bytes)} write-ahead log`,
+    },
+    {
+      k: 'Snapshot cache', v: `${sv.cache.snapshots} / ${sv.cache.max_snapshots}`,
+      m: `${fmtSize(sv.cache.bytes)} of ${fmtSize(sv.cache.budget_bytes)}`,
+    },
+  ];
+  $('#diagServer').innerHTML = tiles.map((t) => `
+    <div class="tile">
+      <div class="k">${t.k}</div>
+      <div class="v">${escapeHtml(String(t.v))}</div>
+      <div class="m">${t.m}</div>
+    </div>`).join('');
+
+  // Only worth saying when some root is actually protected. On a server
+  // with none, "0 hidden" is noise dressed as a security statement.
+  const acc = d.access;
+  $('#diagAccess').innerHTML = !acc.auth_required
+    ? ''
+    : `<div class="notice" role="status">
+         <strong>${acc.authenticated ? 'Signed in.' : 'Not signed in.'}</strong>
+         ${acc.roots_hidden
+           ? (acc.roots_hidden === 1
+             ? `One protected root is not shown here — not its path, not its
+                schedule, not why its scans failed. Sign in to include it.`
+             : `${acc.roots_hidden} protected roots are not shown here — not their
+                paths, not their schedules, not why their scans failed. Sign in to
+                include them.`)
+           : 'Every tracked root is shown, including the protected ones.'}
+       </div>`;
+
+  const now = sv.now;
+  $('#diagRoots').innerHTML = d.roots.length
+    ? d.roots.map((r) => diagRoot(r, now)).join('')
+    : '<div class="card"><div class="empty">No roots are visible to you.</div></div>';
+
+  $('#diagFoot').textContent = `Refreshed ${fmtTime(now)} · this page is not linked from the tabs.`;
+
+  diagTimer = setTimeout(() => {
+    if (state.view === 'diagnostics') loadDiagnostics();
+  }, 3000);
+}
+
+function diagRoot(r, now) {
+  const sch = r.schedule, run = r.running, proc = r.process;
+
+  // A root with no schedule is not idle — nothing is driving it. Worth
+  // saying outright, since the symptom is "the numbers stopped updating".
+  const state_ = run
+    ? `<span class="up">scanning now</span> · started ${fmtTime(run.since)}, ${fmtDur(run.elapsed_s)} ago`
+    : !sch
+      ? '<span class="goneNote">no scan loop in this process</span>'
+      : sch.next_due
+        ? `idle · next scan ${fmtDur(sch.next_due - now)} from now (${fmtTime(sch.next_due)})`
+        : 'idle · not yet scheduled';
+
+  const rows = (r.recent || []).map((s) => `
+    <tr class="${s.status !== 'ok' && s.status !== 'partial' ? 'gone' : ''}">
+      <td class="num">${s.scan_id}</td>
+      <td>${fmtTime(s.at)}</td>
+      <td class="num">${fmtMs(s.duration_ms)}</td>
+      <td class="num">${s.events == null ? '—' : fmtCount(s.events)}</td>
+      <td class="num">${s.entities == null ? '—' : fmtCount(s.entities)}</td>
+      <td>${diagStatus(s.status)}${s.err ? `<div class="detail">${escapeHtml(s.err)}</div>` : ''}</td>
+    </tr>`).join('');
+
+  const facts = [
+    sch && `interval ${fmtDur(sch.interval_s)}`,
+    sch && sch.backed_off
+      && `<span class="up">backed off to ${fmtDur(sch.effective_interval_s)}</span>`,
+    sch && sch.overruns ? `${sch.overruns} overrun${sch.overruns === 1 ? '' : 's'}` : null,
+    `${fmtCount(r.scans.total)} scan${r.scans.total === 1 ? '' : 's'} recorded`,
+    r.scans.failed ? `<span class="up">${fmtCount(r.scans.failed)} failed</span>` : null,
+    r.scans.first_at && `since ${fmtTime(r.scans.first_at)}`,
+    proc && proc.last_attempt_ms != null && `last attempt ${fmtMs(proc.last_attempt_ms)}`,
+  ].filter(Boolean).join(' · ');
+
+  return `
+    <div class="card">
+      <figcaption>
+        <h2>${escapeHtml(r.path.name)}${r.protected ? ' <span class="goneNote">protected</span>' : ''}</h2>
+        <p class="sub">${state_}</p>
+      </figcaption>
+      <p class="sub">${facts}</p>
+      ${proc && proc.last_error
+        ? `<div class="notice" role="status"><strong>Last scan attempt failed.</strong>
+             <div class="detail">${escapeHtml(proc.last_error)}</div></div>`
+        : ''}
+      <div class="listing diag"><table>
+        <thead><tr>
+          <th class="num">Scan</th><th>Started</th><th class="num">Took</th>
+          <th class="num">Events</th><th class="num">Entities</th><th>Status</th>
+        </tr></thead>
+        <tbody>${rows || '<tr><td colspan="6">No scans recorded yet.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+}
+
+function diagStatus(st) {
+  if (st === 'ok') return '<span class="down">ok</span>';
+  // Anything that is not 'ok' changes how the numbers should be read, so it
+  // is coloured like a change rather than printed as a word.
+  return `<span class="up">${escapeHtml(st)}</span>`;
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1401,6 +1550,7 @@ async function refresh() {
       });
     }
     else if (state.view === 'compare') await loadDiff();
+    else if (state.view === 'diagnostics') await loadDiagnostics();
   } catch (e) {
     // A 401 has an answer, so offer it rather than reporting a dead end.
     if (e.needsAuth) openSignIn(e.message);
@@ -1444,7 +1594,7 @@ function syncHash() {
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
   const v = p.get('view');
-  if (v && ['overview', 'explorer', 'changes', 'compare'].includes(v)) state.view = v;
+  if (v && ['overview', 'explorer', 'changes', 'compare', 'diagnostics'].includes(v)) state.view = v;
   if (p.get('path')) state.path = p.get('path');
   if (p.get('window')) state.window = p.get('window');
   if (p.get('metric')) state.metric = p.get('metric');
@@ -1455,6 +1605,9 @@ function readHash() {
 }
 
 function switchView(v) {
+  // The diagnostics poll must not outlive its view, or every other page
+  // quietly keeps hitting the server once a second forever.
+  if (diagTimer) { clearTimeout(diagTimer); diagTimer = null; }
   state.view = v;
   $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
   $$('.view').forEach((s) => s.classList.toggle('on', s.id === 'view-' + v));

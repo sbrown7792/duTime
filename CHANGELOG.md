@@ -11,6 +11,41 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.11 — 2026-09-19
+
+- **A diagnostics page, at `#view=diagnostics`.** Not in the tab bar: it
+  answers "what is this server doing", which is a question you arrive at
+  already knowing you have, rather than one to put in front of everyone
+  looking at a disk chart.
+
+  Build and uptime, database and write-ahead log sizes, snapshot cache
+  occupancy, and per root: whether a scan is running **right now** and for how
+  long, when the next is due, the configured interval and whether overruns
+  have backed it off, and the last dozen scans with durations, event counts
+  and status. It polls while open, because "a scan is running" is true for a
+  few seconds at a time and a page that answered once would mostly answer
+  wrongly — and stops polling the moment you leave it.
+
+  Whether a scan is in flight is not a question the database can answer: a
+  `scan` row appears when a scan *finishes*. The scheduler now publishes its
+  loop state — running since, next due, effective interval, overruns, last
+  error — which is where the live half of this page comes from.
+
+  Alone among the views it does **not** filter to `status IN ('ok','partial')`.
+  The rest of the UI does, so a chart never plots a drop that never happened;
+  here that same filter would hide the fault from the one page meant to show
+  it. Failed scans are listed with their error text verbatim.
+
+- **Diagnostics respects protected roots.** Without the token: the server's
+  own figures and the unprotected roots, and nothing whatsoever about the
+  rest — not a path, not a schedule, not why a scan failed. It is the page
+  that reports paths, schedules, counts and error strings all at once, which
+  makes it the worst place to forget the filter, so the test asserts the
+  absence by searching the whole response rather than only the roots array.
+  The count of hidden roots *is* reported: the sign-in control already says
+  protected roots exist, and a diagnostics page that silently omits half the
+  machine is worse than one that says how much it is not showing.
+
 ## 0.5.10 — 2026-09-18
 
 - **Releases now ship a binary.** Tagging builds a statically linked

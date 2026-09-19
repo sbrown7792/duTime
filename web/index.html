@@ -198,6 +198,17 @@
       </p>
     </div>
   </section>
+
+  <!-- Operator view. Deliberately absent from the tab bar: it answers
+       "what is this server doing", which is a question you arrive at
+       knowing, not one to put in front of everyone looking at a disk
+       chart. Reached at #view=diagnostics. -->
+  <section id="view-diagnostics" class="view">
+    <div id="diagServer" class="tiles"></div>
+    <div id="diagAccess"></div>
+    <div id="diagRoots"></div>
+    <p class="sub" id="diagFoot"></p>
+  </section>
 </main>
 
 <div id="toast" role="status" aria-live="polite"></div>

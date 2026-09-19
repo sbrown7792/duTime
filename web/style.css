@@ -303,6 +303,12 @@ tr:last-child td { border-bottom: none; }
 
 /* ── directory listing with trend sparklines ─────────────────────────── */
 .listing table { table-layout: fixed; }
+/* The diagnostics tables have no name column to absorb the slack, so a fixed
+   layout splits six columns evenly and leaves a wide gutter beside each
+   number. Size these to their contents instead. */
+.listing.diag table { table-layout: auto; }
+.listing.diag td, .listing.diag th { white-space: nowrap; }
+.listing.diag td .detail { white-space: normal; }
 .listing th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .listing th.sortable:hover { color: var(--text-secondary); }
 .listing th.sortable[aria-sort]::after { content: " \2191"; font-size: 10px; }

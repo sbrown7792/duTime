@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::scan::walker::{ScanOptions, scan};
 use crate::store::commit::{CommitOptions, commit_scan};
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,16 +52,29 @@ impl Scheduler {
         let mut overruns: u32 = 0;
         let mut backoff: u32 = 1;
 
+        // The path the diagnostics view will join on. Canonical, because that
+        // is the form the store records and the form the walk resolves to.
+        let key = root.path.canonicalize().unwrap_or_else(|_| root.path.clone());
+        self.state.note_activity(&key, |a| {
+            a.interval_s = root.interval_s.max(1);
+            a.effective_interval_s = a.interval_s;
+        });
+
         if self.cfg.scan_on_start {
-            self.scan_once(&root, &running, &announced).await;
+            self.scan_once(&root, &key, &running, &announced).await;
         }
 
         loop {
             let wait = root.interval_s.max(1) * backoff as u64;
+            self.state.note_activity(&key, |a| {
+                a.effective_interval_s = wait;
+                a.next_due = Some(crate::cli::now() + wait as i64);
+            });
             tokio::time::sleep(Duration::from_secs(wait)).await;
 
             if running.load(Ordering::SeqCst) {
                 overruns += 1;
+                self.state.note_activity(&key, |a| a.overruns = overruns);
                 tracing::warn!(
                     root = %root.path.display(),
                     overruns,
@@ -78,9 +91,10 @@ impl Scheduler {
                 continue;
             }
 
-            if self.scan_once(&root, &running, &announced).await {
+            if self.scan_once(&root, &key, &running, &announced).await {
                 // Recover as soon as scans fit in the interval again.
                 overruns = 0;
+                self.state.note_activity(&key, |a| a.overruns = 0);
                 if backoff > 1 {
                     backoff = 1;
                     tracing::info!(root = %root.path.display(), "scan times recovered; interval restored");
@@ -92,16 +106,40 @@ impl Scheduler {
     async fn scan_once(
         &self,
         root: &crate::config::RootConfig,
+        key: &Path,
         running: &Arc<AtomicBool>,
         announced: &Arc<Mutex<Option<Vec<PathBuf>>>>,
     ) -> bool {
         running.store(true, Ordering::SeqCst);
+        let began = crate::cli::now();
+        let t0 = Instant::now();
+        self.state.note_activity(key, |a| {
+            a.running_since = Some(began);
+            a.last_started = Some(began);
+        });
         let res = self.do_scan(root, announced).await;
         running.store(false, Ordering::SeqCst);
+        let took = t0.elapsed().as_millis() as i64;
         match res {
-            Ok(()) => true,
+            Ok(()) => {
+                self.state.note_activity(key, |a| {
+                    a.running_since = None;
+                    a.last_walk_ms = Some(took);
+                    a.last_error = None;
+                    a.scans_completed += 1;
+                });
+                true
+            }
             Err(e) => {
                 tracing::error!(root = %root.path.display(), "scan failed: {e:#}");
+                // Kept verbatim: a diagnostics page that says a scan failed
+                // without saying why sends you to the journal anyway.
+                self.state.note_activity(key, |a| {
+                    a.running_since = None;
+                    a.last_walk_ms = Some(took);
+                    a.last_error = Some(format!("{e:#}"));
+                    a.scans_failed += 1;
+                });
                 false
             }
         }
