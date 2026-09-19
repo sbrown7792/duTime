@@ -553,6 +553,14 @@ and reads come from a pool of connections separate from the writer. Worst-case
 API latency during a scan is ~160 ms. If you see seconds, open an issue with
 `dutime doctor` output.
 
+Restarting during one is also quick. `SIGTERM` cancels the walk, so the
+service does not sit waiting for a scan that may have an hour left to run,
+and the partial result is discarded rather than committed — a fragment of a
+tree written as a measurement would show up as a cliff on every chart. A
+**commit** already in progress is allowed to finish instead of being cut off:
+it takes seconds rather than minutes, and interrupting one would throw away a
+walk that had already completed.
+
 ## How it works
 
 A scheduled walk, a change-only event log, and an in-memory rollup.

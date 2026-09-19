@@ -11,6 +11,36 @@ That is what answers "is the thing running on that server the thing I just
 built?", which a semver cannot, since it is identical across every build
 between releases.
 
+## 0.5.13 — 2026-09-19
+
+- **A restart no longer waits for a scan, and no longer interrupts a commit.**
+  A tokio runtime does not finish dropping until its blocking tasks return,
+  and the walk is one — so `systemctl restart` during a scan sat there. On a
+  real server the `/media/nextcloud` walk runs a median of **80 minutes**
+  against systemd's 90-second stop timeout, so such a restart always ran out
+  the clock and ended in `SIGKILL`.
+
+  `SIGTERM` now cancels the walk, which checks a flag per entry and quits in
+  milliseconds. Measured locally, shutdown mid-walk went from **1.99 s to
+  0.29 s**; idle shutdown was already 0.02 s.
+
+  The partial walk is **discarded, never committed**. A fragment of a tree
+  written as a scan is not a small measurement, it is a false one: it would
+  draw a collapse to near-nothing on every chart, which is the exact failure
+  this tool exists to catch. Verified — a run killed mid-walk leaves zero
+  scan rows.
+
+  A **commit** in progress is deliberately left alone. It takes seconds, not
+  minutes (measured: 6.2 s for 1.3M entities, 2.6 s in steady state, 0.4 s on
+  a 134k-entity tree), and cutting one off discards a walk that has already
+  finished. Verified by timing `SIGTERM` into the commit window: the scan row
+  is written and the process exits once it is done.
+
+  Backstops either side of that: the runtime drop is bounded at 60 s, so a
+  blocking task that ignores the signal cannot hold the service open
+  indefinitely, and both units now set `TimeoutStopSec=75` rather than
+  inheriting the 90-second default.
+
 ## 0.5.12 — 2026-09-19
 
 - **A gear at the end of the tab row opens the diagnostics page.** It was

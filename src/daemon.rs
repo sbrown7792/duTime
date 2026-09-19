@@ -15,6 +15,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// Set once when a signal arrives, watched by every in-flight walk.
+///
+/// Shared rather than global so a scan started by anything else — the CLI,
+/// a test — is unaffected, and so there is no per-scan task polling it.
+///
+/// A walk is a blocking task, and a tokio runtime does not finish dropping
+/// until its blocking tasks return — so before this existed, a restart during
+/// an hour-long walk waited for the walk. Measured on a real server: the
+/// `/media/nextcloud` walk runs a median of 80 minutes, against a systemd
+/// stop timeout of 90 seconds, so every such restart ended in SIGKILL.
+///
+/// A commit is deliberately *not* cancellable. It takes seconds rather than
+/// minutes (measured: 6.2 s for 1.3M entities, 2.6 s in steady state), and
+/// interrupting one throws away a walk that has already finished.
 /// Consecutive overruns before the effective interval is doubled.
 const OVERRUNS_BEFORE_BACKOFF: u32 = 3;
 /// Never back off beyond this multiple of the configured interval.
@@ -23,11 +37,12 @@ const MAX_BACKOFF: u32 = 8;
 pub struct Scheduler {
     state: Arc<AppState>,
     cfg: Config,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Scheduler {
-    pub fn new(state: Arc<AppState>, cfg: Config) -> Self {
-        Self { state, cfg }
+    pub fn new(state: Arc<AppState>, cfg: Config, cancel: Arc<AtomicBool>) -> Self {
+        Self { state, cfg, cancel }
     }
 
     /// One task per root, each with its own interval and its own backoff.
@@ -156,6 +171,7 @@ impl Scheduler {
         opts.exclude = root.exclude.clone();
         opts.exclude_prefixes = root.exclude_paths.clone();
         opts.threads = self.cfg.threads;
+        opts.cancel = Some(self.cancel.clone());
 
         let started_at = crate::cli::now();
         let t0 = Instant::now();
@@ -170,6 +186,20 @@ impl Scheduler {
         .await??;
         let (r, roll, opts) = result;
         let walk_ms = t0.elapsed().as_millis() as i64;
+
+        // A walk that stopped early has seen a fragment of the tree. Its
+        // totals are not small because the disk emptied, they are small
+        // because we stopped looking — and a scan row saying so would show
+        // up as a cliff on every chart. Drop it and let the next scan,
+        // after the restart, measure the tree properly.
+        if r.stats.cancelled {
+            tracing::info!(
+                root = %root.path.display(),
+                walk_ms,
+                "shutting down mid-walk; discarding the partial scan"
+            );
+            return Ok(());
+        }
         // Read before `r` moves into the commit closure.
         let n_errors = r.stats.n_errors;
         let examples = r.stats.unreadable.clone();
@@ -313,7 +343,9 @@ pub async fn serve(cfg: Config) -> Result<()> {
     state.set_access(auth, protected);
     let state = Arc::new(state);
 
-    let sched = Arc::new(Scheduler::new(state.clone(), cfg.clone()));
+    // Set by the signal handler, read by whatever walk is in flight.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = Arc::new(Scheduler::new(state.clone(), cfg.clone(), cancel.clone()));
     sched.spawn_all();
 
     let app = crate::api::router(state)
@@ -363,7 +395,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown(cancel))
         .await?;
     Ok(())
 }
@@ -396,7 +428,7 @@ fn spawn_watchdog() {
     });
 }
 
-async fn shutdown() {
+async fn shutdown(cancel: Arc<AtomicBool>) {
     let ctrl_c = async { tokio::signal::ctrl_c().await.ok(); };
     let term = async {
         #[cfg(unix)]
@@ -409,6 +441,9 @@ async fn shutdown() {
         std::future::pending::<()>().await;
     };
     tokio::select! { _ = ctrl_c => {}, _ = term => {} }
+    // Set before anything else: a walk in progress should start unwinding
+    // while the HTTP server is still draining, not after.
+    cancel.store(true, Ordering::SeqCst);
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
     tracing::info!("shutting down");
 }

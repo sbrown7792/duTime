@@ -15,6 +15,8 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -56,6 +58,14 @@ pub struct ScanOptions {
     /// path means the same thing regardless of which root is being scanned.
     pub exclude_prefixes: Vec<PathBuf>,
     pub threads: usize,
+    /// Set to abandon the walk as soon as the threads notice.
+    ///
+    /// A walk of a large NFS root runs for over an hour, and until this
+    /// existed a service restart during one waited for it: the runtime does
+    /// not drop until its blocking tasks return, so systemd hit its 90 s
+    /// stop timeout and sent SIGKILL. Checked per entry, which is cheap
+    /// beside the `statx` that follows it.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl ScanOptions {
@@ -67,6 +77,7 @@ impl ScanOptions {
             exclude: Vec::new(),
             exclude_prefixes: Vec::new(),
             threads: default_threads(),
+            cancel: None,
         }
     }
 }
@@ -85,6 +96,11 @@ pub fn default_threads() -> usize {
 
 #[derive(Debug, Default, Clone)]
 pub struct ScanStats {
+    /// The walk was asked to stop and did. Nothing derived from this scan is
+    /// a measurement of the tree: the totals are whatever had been reached
+    /// when the signal arrived, so committing them would record a collapse
+    /// that never happened.
+    pub cancelled: bool,
     pub n_dirs: i64,
     pub n_files: i64,
     pub n_entities: i64,
@@ -186,6 +202,7 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
     out.stats.n_errors = w.n_errors;
     out.stats.unreadable = w.unreadable;
     out.stats.other_filesystems = w.other_filesystems;
+    out.stats.cancelled = w.cancelled;
     out.stats.root_fstype = root_fstype;
     Ok(out)
 }
@@ -197,6 +214,9 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<ScanResult> {
 /// `Vec<PathBuf>` is the unreadable paths and which is the crossed mounts.
 struct WalkOutput {
     raw: Vec<RawEntry>,
+    /// The walk stopped early because it was asked to. The entries gathered
+    /// so far are a fragment of the tree and must not be treated as one.
+    cancelled: bool,
     n_errors: i64,
     /// Paths that could not be read; their contents are missing from `raw`.
     unreadable: Vec<PathBuf>,
@@ -277,8 +297,14 @@ fn walk(
             let n_errors = n_errors.clone();
             let unreadable = unreadable.clone();
             let other_fs = other_fs.clone();
+            let cancel = opts.cancel.clone();
             Box::new(move |res| {
                 use ignore::WalkState;
+                // Checked before the entry is even unwrapped, so a shutdown
+                // is not held up by whatever this one turns out to be.
+                if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return WalkState::Quit;
+                }
                 let entry = match res {
                     Ok(e) => e,
                     Err(e) => {
@@ -371,6 +397,7 @@ fn walk(
     let mut other_filesystems = take(other_fs);
     other_filesystems.sort();
     Ok(WalkOutput {
+        cancelled: opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)),
         raw,
         n_errors: n_errors.load(std::sync::atomic::Ordering::Relaxed),
         unreadable: take(unreadable),
@@ -505,6 +532,45 @@ pub fn entities(tree: &Tree) -> Vec<Entity> {
 #[cfg(test)]
 mod crossing_tests {
     use super::*;
+
+    /// A cancelled walk says so, and says it loudly enough to be refused.
+    ///
+    /// This is the flag the daemon reads before deciding whether to commit.
+    /// If it were ever silently false, a walk stopped a minute into an
+    /// hour-long scan would be written as a real measurement — recording a
+    /// collapse to near-nothing that never happened, on the one chart people
+    /// look at to find out what changed.
+    #[test]
+    fn a_cancelled_walk_reports_that_it_was_cancelled() {
+        let dir = tempfile::Builder::new().prefix("dutime-cancel-").tempdir().unwrap();
+        for i in 0..200 {
+            let d = dir.path().join(format!("d{i}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("f"), b"x").unwrap();
+        }
+
+        // Already set, so the very first entry the walk reaches stops it.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut o = ScanOptions::new(dir.path());
+        o.threads = 2;
+        o.cancel = Some(cancel.clone());
+        let r = scan(&o).expect("a cancelled walk is not an error, it is a short one");
+        assert!(r.stats.cancelled, "a cancelled walk did not report itself as cancelled");
+
+        // And the same tree, left alone, is complete and does not claim to
+        // have been cancelled -- otherwise the flag would be useless in the
+        // direction that matters.
+        let mut o2 = ScanOptions::new(dir.path());
+        o2.threads = 2;
+        let full = scan(&o2).expect("scan");
+        assert!(!full.stats.cancelled, "an ordinary walk claimed to be cancelled");
+        assert!(
+            full.tree.len() > r.tree.len(),
+            "the cancelled walk saw as much as the complete one ({} vs {}), so nothing was cut short",
+            r.tree.len(),
+            full.tree.len()
+        );
+    }
 
     /// An ordinary single-filesystem tree must report no crossings.
     ///

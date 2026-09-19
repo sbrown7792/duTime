@@ -317,10 +317,17 @@ pub fn run(cli: Cli) -> Result<()> {
                      (see `dutime config`)"
                 );
             }
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?
-                .block_on(crate::daemon::serve(cfg))
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            let r = rt.block_on(crate::daemon::serve(cfg));
+            // Dropping a runtime waits for its blocking tasks, and a commit
+            // is one: that wait is wanted, because a commit takes seconds
+            // and interrupting it discards a walk that already finished.
+            // The walk itself is cancelled by the signal handler, so the
+            // only thing this bound catches is a blocking task that ignored
+            // the signal — a bug, and one that should not be able to hold
+            // the service open until systemd loses patience and SIGKILLs.
+            rt.shutdown_timeout(std::time::Duration::from_secs(60));
+            r
         }
         Cmd::Token { write, force } => cmd_token(write.as_deref(), force),
         Cmd::Doctor { config, no_network } => {

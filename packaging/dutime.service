@@ -14,6 +14,11 @@ After=network.target local-fs.target
 
 [Service]
 Type=notify
+# Long enough for a commit to finish — measured at 6.2 s for a 1.3M-entity
+# tree — and short enough that a stuck one is noticed rather than waited on.
+# The walk is cancelled on SIGTERM, so a restart mid-scan no longer waits for
+# it; without that, the default 90 s elapsed and the service was SIGKILLed.
+TimeoutStopSec=75
 NotifyAccess=main
 WatchdogSec=900
 User=dutime

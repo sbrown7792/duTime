@@ -8,6 +8,8 @@ After=default.target
 
 [Service]
 Type=notify
+# See the system unit: a commit is allowed to finish, a stuck one is not.
+TimeoutStopSec=75
 NotifyAccess=main
 WatchdogSec=900
 ExecStart=%h/.local/bin/dutime serve --config %h/.config/dutime/config.toml
