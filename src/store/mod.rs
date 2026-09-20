@@ -8,6 +8,7 @@
 //! lookup by `path_id` or a bounded time-range scan, never a full-table
 //! aggregation. See `docs/storage.md`.
 
+pub mod ballast;
 pub mod commit;
 pub mod query;
 pub mod snapshot;
@@ -70,9 +71,16 @@ impl Store {
                 std::fs::create_dir_all(dir).ok();
             }
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("opening database {}", path.display()))?;
-        Self::from_conn(conn)
+        // A database on a filesystem with zero bytes free cannot be opened at
+        // all — not even to read — because WAL mode has to size a `-shm` file
+        // first. That is precisely when someone is trying to find out what
+        // filled the disk, so spend the reserve rather than refuse to start.
+        // See `ballast`.
+        ballast::with_rescue(path, "opening the database", || {
+            let conn = Connection::open(path)
+                .with_context(|| format!("opening database {}", path.display()))?;
+            Self::from_conn(conn)
+        })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -98,10 +106,13 @@ impl Store {
     /// perfectly ordinary setup into a confusing "attempt to write a readonly
     /// database" at runtime. Nothing in the API layer issues a write.
     pub fn open_reader(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path.as_ref())
-            .with_context(|| format!("opening database {}", path.as_ref().display()))?;
-        apply_pragmas(&conn)?;
-        Ok(Self { conn })
+        let path = path.as_ref();
+        ballast::with_rescue(path, "opening a reader", || {
+            let conn = Connection::open(path)
+                .with_context(|| format!("opening database {}", path.display()))?;
+            apply_pragmas(&conn)?;
+            Ok(Self { conn })
+        })
     }
 
     /// Forward-only migrations keyed on `meta.schema_version`.

@@ -307,7 +307,7 @@ pub fn commit_scan(
 /// Feeds the "unaccounted space" reconciliation: the gap between what the
 /// filesystem says is used and what duTime can attribute to a path is where
 /// deleted-but-still-open files and mis-scoped excludes show up.
-fn statvfs(path: &Path) -> Option<(i64, i64, i64)> {
+pub(crate) fn statvfs(path: &Path) -> Option<(i64, i64, i64)> {
     let v = rustix::fs::statvfs(path).ok()?;
     let f = v.f_frsize as i64;
     Some((v.f_blocks as i64 * f, v.f_bfree as i64 * f, v.f_bavail as i64 * f))

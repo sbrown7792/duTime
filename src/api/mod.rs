@@ -14,6 +14,7 @@
 
 pub mod state;
 
+use crate::api::state::RootActivity;
 use crate::model::{Metric, PathId, RootId, ScanId};
 use crate::auth::Viewer;
 use crate::store::Store;
@@ -321,6 +322,7 @@ async fn diagnostics(State(s): State<Arc<AppState>>, viewer: Viewer) -> ApiResul
                 "process": act.as_ref().map(|a| json!({
                     "scans_completed": a.scans_completed,
                     "scans_failed": a.scans_failed,
+                    "consecutive_failures": a.consecutive_failures,
                     "last_attempt_at": a.last_started,
                     "last_attempt_ms": a.last_walk_ms,
                     "last_error": a.last_error,
@@ -340,6 +342,16 @@ async fn diagnostics(State(s): State<Arc<AppState>>, viewer: Viewer) -> ApiResul
                 "now": crate::cli::now(),
                 "db_bytes": db,
                 "wal_bytes": wal,
+                // Free space where the *database* lives, which is not the
+                // same filesystem as any tracked root need be. A database on
+                // a filesystem with nothing free cannot be opened even to
+                // read, so this number is the one that decides whether duTime
+                // will still work during the incident it is meant to explain.
+                "db_fs": s.db_free().map(|(total, _, avail)| json!({
+                    "total_bytes": total,
+                    "avail_bytes": avail,
+                })),
+                "ballast": s.ballast(),
                 "cache": s.cache_stats(),
             },
             "access": {
@@ -583,6 +595,13 @@ async fn overview(
             }
         };
 
+        let fresh = freshness(
+            crate::cli::now(),
+            &history.iter().map(|(t, ..)| *t).collect::<Vec<_>>(),
+            s.activity_for(&path).as_ref(),
+        );
+        let db_free = s.db_free();
+
         Ok(json!({
             "root_id": root,
             "path": path_json(&path),
@@ -597,11 +616,113 @@ async fn overview(
             "forecast": forecast,
             "scan_status": partial.0,
             "scan_error": partial.1,
+            // Whether the newest scan is as new as this root's schedule says
+            // it should be, and — separately — whether the filesystem the
+            // *database* lives on has room to record the next one. The second
+            // is not the same question as `fs` above: the database can sit on
+            // a different filesystem entirely, and it is that one filling up
+            // that stops duTime recording anything at all.
+            "freshness": fresh,
+            "db": {
+                "free_bytes": db_free.map(|v| v.2),
+                "total_bytes": db_free.map(|v| v.0),
+                "ballast_held": s.ballast().get("held").and_then(|v| v.as_bool()).unwrap_or(false),
+                // Zero when no reserve is configured, which is what lets the
+                // dashboard tell "the reserve was spent keeping this page
+                // readable" apart from "there was never a reserve".
+                "ballast_bytes": s.ballast().get("configured_bytes").cloned(),
+            },
             "fstype": fstype,
             "server_authorized": fstype.as_deref().is_some_and(crate::scan::mounts::is_server_authorized),
         }))
     })
     .await
+}
+
+/// Is the newest scan older than this root's *own* schedule says it should be?
+///
+/// A fixed threshold cannot work here. The interval is a per-root setting: the
+/// default is hourly, but a root on a slow archive volume may well be scanned
+/// weekly, and "no scan for two hours" is an incident on the first and
+/// unremarkable on the second. So the threshold is built from the interval
+/// actually in force:
+///
+/// ```text
+/// stale_after = interval + how long the last walk took + grace
+/// grace       = interval / 10, clamped to [2 min, 1 h]
+/// ```
+///
+/// The walk term matters because the scheduler sleeps for the interval and
+/// *then* scans, so consecutive scans start `interval + walk` apart — without
+/// it, every root whose walk takes longer than its grace would report itself
+/// permanently late.
+///
+/// `interval` comes from the scheduler when it owns this root, so a backoff is
+/// reflected the moment it happens. A root scanned from cron or by
+/// `dutime scan` has no scheduler entry, and rather than assume an hour the
+/// cadence is read back off the scan history — the median gap between recent
+/// scans already includes the walk time, so it is used as the whole budget.
+fn freshness(now: i64, starts: &[i64], act: Option<&RootActivity>) -> Value {
+    let last = match starts.last() {
+        Some(t) => *t,
+        None => return json!({ "known": false }),
+    };
+    let age = (now - last).max(0);
+
+    // The scheduler's own numbers first: authoritative, and current.
+    let from_schedule = act.map(|a| a.effective_interval_s).filter(|s| *s > 0);
+    let walk_s = act.and_then(|a| a.last_walk_ms).unwrap_or(0) / 1000;
+
+    let (budget, interval, source) = match from_schedule {
+        Some(iv) => {
+            let grace = (iv / 10).clamp(120, 3600) as i64;
+            (iv as i64 + walk_s + grace, Some(iv), "schedule")
+        }
+        None => match median_gap(starts) {
+            // An observed gap is already interval-plus-walk, so it is the
+            // budget on its own; the grace is what stops a single slow scan
+            // from tripping it.
+            Some(gap) => (gap + (gap / 10).clamp(120, 3600), Some(gap as u64), "observed"),
+            None => return json!({ "known": false, "last_scan_at": last, "age_s": age }),
+        },
+    };
+
+    json!({
+        "known": true,
+        "last_scan_at": last,
+        "age_s": age,
+        "stale": age > budget,
+        "stale_after_s": budget,
+        "interval_s": interval,
+        "interval_source": source,
+        "scanning": act.and_then(|a| a.running_since).is_some(),
+        "backed_off": act.is_some_and(|a| a.effective_interval_s > a.interval_s),
+        "configured_interval_s": act.map(|a| a.interval_s).filter(|s| *s > 0),
+        "failures": act.map(|a| a.scans_failed).unwrap_or(0),
+        // The one to build a warning on: cleared by a success, so it answers
+        // "is this failing now" rather than "has it ever failed".
+        "consecutive_failures": act.map(|a| a.consecutive_failures).unwrap_or(0),
+        "last_error": act.and_then(|a| a.last_error.clone()),
+        "disk_full": act.is_some_and(|a| a.last_error_disk_full),
+    })
+}
+
+/// Median start-to-start gap over the most recent scans.
+///
+/// Median rather than mean so one restart, or one window where the service was
+/// off, does not redefine what "on time" means for the whole root.
+fn median_gap(starts: &[i64]) -> Option<i64> {
+    const WINDOW: usize = 10;
+    let tail = &starts[starts.len().saturating_sub(WINDOW + 1)..];
+    if tail.len() < 3 {
+        return None;
+    }
+    let mut gaps: Vec<i64> = tail.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0).collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    gaps.sort_unstable();
+    Some(gaps[gaps.len() / 2])
 }
 
 /// Median of pairwise slopes. Returns `None` with fewer than two points.
@@ -1999,5 +2120,119 @@ fn kind_of(k: u8) -> &'static str {
         1 => "file",
         2 => "symlink",
         _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    fn act(interval_s: u64, walk_ms: i64) -> RootActivity {
+        RootActivity {
+            interval_s,
+            effective_interval_s: interval_s,
+            last_walk_ms: Some(walk_ms),
+            ..Default::default()
+        }
+    }
+
+    fn stale(now: i64, starts: &[i64], a: Option<&RootActivity>) -> bool {
+        freshness(now, starts, a)["stale"].as_bool().unwrap()
+    }
+
+    /// The whole point of the threshold: it is a property of the root, not a
+    /// constant. Two hours without a scan is an incident on an hourly root
+    /// and completely unremarkable on a weekly one, and a banner that cannot
+    /// tell them apart is either useless or permanently wrong.
+    #[test]
+    fn lateness_is_measured_against_this_root_s_own_interval() {
+        let now = 1_000_000;
+        let two_hours_ago = &[now - 7200];
+
+        let hourly = act(3600, 2_000);
+        assert!(stale(now, two_hours_ago, Some(&hourly)));
+
+        let weekly = act(7 * 86400, 2_000);
+        assert!(!stale(now, two_hours_ago, Some(&weekly)));
+        // ...and the weekly root is still not late a day later.
+        assert!(!stale(now, &[now - 86400], Some(&weekly)));
+        // It is late once its own week has passed.
+        assert!(stale(now, &[now - 8 * 86400], Some(&weekly)));
+    }
+
+    /// The scheduler sleeps for the interval and *then* walks, so consecutive
+    /// scans start `interval + walk` apart. Without the walk term, every root
+    /// whose scan takes longer than its grace reports itself permanently late
+    /// while behaving exactly as configured.
+    #[test]
+    fn a_long_walk_does_not_make_a_root_look_late() {
+        let now = 1_000_000;
+        // Hourly, but the walk itself takes 50 minutes — the real shape of
+        // the `/media/nextcloud` root on the author's server.
+        let slow = act(3600, 50 * 60 * 1000);
+        assert!(!stale(now, &[now - 3600 - 50 * 60 - 60], Some(&slow)));
+        assert!(stale(now, &[now - 2 * (3600 + 50 * 60)], Some(&slow)));
+    }
+
+    /// A root scanned from cron has no scheduler entry. Assuming an hour
+    /// would cry wolf on a nightly cron job every single morning, so the
+    /// cadence is read back off the history instead.
+    #[test]
+    fn a_root_with_no_schedule_here_is_judged_on_its_observed_cadence() {
+        let now = 1_000_000;
+        let day = 86400;
+        let nightly: Vec<i64> = (1..=6).rev().map(|n| now - n * day).collect();
+        let f = freshness(now, &nightly, None);
+        assert_eq!(f["interval_source"], "observed");
+        assert_eq!(f["interval_s"], day);
+        // One day old on a nightly cadence is exactly on time.
+        assert!(!f["stale"].as_bool().unwrap());
+
+        // Three days without the nightly job having run is not.
+        let mut missed = nightly.clone();
+        missed.pop();
+        missed.pop();
+        assert!(stale(now, &missed, None));
+    }
+
+    /// Too little history to know the cadence: say nothing rather than guess.
+    #[test]
+    fn no_opinion_without_enough_history() {
+        let now = 1_000_000;
+        assert_eq!(freshness(now, &[], None)["known"], false);
+        assert_eq!(freshness(now, &[now - 99999], None)["known"], false);
+    }
+
+    /// The median ignores a gap the service was simply switched off for,
+    /// rather than letting one outage redefine "on time" for the root.
+    #[test]
+    fn one_outage_does_not_redefine_the_cadence() {
+        let now = 1_000_000;
+        let h = 3600;
+        let starts = [
+            now - 20 * h,
+            now - 19 * h,
+            now - 18 * h, // ... then nothing for half a day ...
+            now - 6 * h,
+            now - 5 * h,
+            now - 4 * h,
+            now - 3 * h,
+        ];
+        assert_eq!(freshness(now, &starts, None)["interval_s"], h);
+    }
+
+    /// Backoff is a change to the interval that the operator did not make, so
+    /// the threshold has to follow it or the banner fires on duTime's own
+    /// deliberate behaviour.
+    #[test]
+    fn a_backed_off_root_is_judged_against_the_widened_interval() {
+        let now = 1_000_000;
+        let mut a = act(3600, 1_000);
+        a.effective_interval_s = 4 * 3600;
+        let f = freshness(now, &[now - 3 * 3600], Some(&a));
+        assert!(!f["stale"].as_bool().unwrap());
+        assert_eq!(f["backed_off"], true);
+        assert_eq!(f["configured_interval_s"], 3600);
+        assert_eq!(f["interval_s"], 4 * 3600);
     }
 }

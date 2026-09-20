@@ -571,24 +571,119 @@ async function loadOverview() {
           ? ` Scaled to the whole ${fmtSize(total)} filesystem.`
           : zeroBased ? '' : ' The scale is fitted to the range shown, not to zero.');
 
-  // A scan that could not read part of the tree reports a total that is too
-  // low, and a shortfall that is never mentioned is indistinguishable from a
-  // real shrink — the one confusion this tool exists to prevent.
-  $('#scanWarn').innerHTML = o.scan_status === 'partial'
-    ? `<div class="notice" role="status">
-         <strong>This scan is incomplete.</strong> Some paths could not be read, so
-         every total below is lower than the truth. Growth trends are still
-         meaningful when the same paths fail each time.
-         ${o.scan_error ? `<div class="detail">${escapeHtml(o.scan_error)}</div>` : ''}
-         <div class="detail">${permissionAdvice(o)}</div>
-       </div>`
-    : '';
+  $('#scanWarn').innerHTML = scanNotices(o);
 
   // Fixed, not inherited: this pane is titled "Biggest gainers" and says it
   // counts a directory's own files, so that is what it asks for whatever the
   // Changes tab happens to be set to.
   await loadGainers('#gainTable', 8, { losers: false, mode: 'exclusive', collapse: true });
   });
+}
+
+/** Seconds as a duration to read in a sentence: 45s, 30m, 6h, 2h 15m, 7d.
+ *
+ * Coarser than `fmtDur` on purpose. That one reports measurements, where the
+ * seconds are the point; this one reports schedules and ages, where "every
+ * 30m 00s" and "6h 00m old" read like machine output and "every 30m" and "6h
+ * old" read like English.
+ */
+function fmtSpan(sec) {
+  if (sec == null || !isFinite(sec)) return '—';
+  const s = Math.max(0, Math.round(sec));
+  if (s < 90) return `${s}s`;
+  if (s < 5400) return `${Math.round(s / 60)}m`;
+  if (s < 129600) {
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600);
+  return h ? `${d}d ${h}h` : `${d}d`;
+}
+
+/** Everything the Overview needs to say before anyone reads a number off it.
+ *
+ * Ordered by what to do about it, not by severity as such: a disk that is
+ * full stops duTime recording anything and has a specific fix, a scan that
+ * failed some other way needs the journal, and data that is merely old needs
+ * nothing but saying so.
+ */
+function scanNotices(o) {
+  const out = [];
+  const f = o.freshness || {};
+  const db = o.db || {};
+  const age = f.age_s == null ? null : fmtSpan(f.age_s);
+  const asOf = f.last_scan_at
+    ? `Everything below is from <b>${fmtTime(f.last_scan_at)}</b>, ${age} ago.`
+    : '';
+
+  // The database's filesystem has no room left. This is the one failure that
+  // silently freezes the whole tool while every number on screen still looks
+  // perfectly plausible, so it is stated first and stated plainly.
+  const reserve = db.ballast_bytes || 0;
+  const low = db.free_bytes != null && db.free_bytes < Math.max(reserve, 16 << 20);
+  // `last_error` is cleared by a success, so it says whether scans are
+  // failing *now*. The lifetime failure count is not usable here: a root that
+  // failed twice last month would wear this banner forever.
+  const failing = !!f.last_error;
+  if (f.disk_full || (low && failing)) {
+    out.push(`<div class="notice critical" role="alert">
+      <strong>duTime cannot record new scans: the disk holding its own database is full.</strong>
+      ${asOf} Scans are still running and still being thrown away, so the totals below
+      will not move until there is room to write them.
+      <div class="detail">Free some space on the filesystem holding duTime's database${
+        db.free_bytes != null && db.total_bytes
+          ? ` — ${fmtSize(db.free_bytes)} free of ${fmtSize(db.total_bytes)}` : ''}.
+        Diagnostics — the gear above — says where it lives. duTime picks
+        up again by itself on the next scan; it does not need restarting.</div>
+      ${reserve && !db.ballast_held ? `<div class="detail">It has already released its
+        ${fmtSize(reserve)} reserve so this page would still open — that reserve is gone
+        until free space recovers.</div>` : ''}
+    </div>`);
+  } else if (low) {
+    // Not failing yet, but the next commit is the one that will.
+    out.push(`<div class="notice" role="status">
+      <strong>The disk holding duTime's database is nearly full.</strong>
+      ${fmtSize(db.free_bytes)}${db.total_bytes ? ` free of ${fmtSize(db.total_bytes)}` : ' free'}. Below about
+      ${fmtSize(Math.max(reserve, 16 << 20))} it stops being able to record scans at all.
+    </div>`);
+  } else if (failing) {
+    const n = f.consecutive_failures || 1;
+    out.push(`<div class="notice critical" role="alert">
+      <strong>The last ${n === 1 ? 'scan' : `${n} scans`} failed.</strong>
+      ${asOf}
+      <div class="detail">${escapeHtml(f.last_error)}</div>
+    </div>`);
+  }
+
+  // Old data with nothing visibly broken — the daemon was stopped, the host
+  // was asleep, or a walk is simply taking far longer than it used to.
+  if (f.stale && !failing) {
+    const iv = fmtSpan(f.interval_s);
+    const how = f.interval_source === 'schedule'
+      ? `This root is set to scan every ${iv}`
+      : `This root has no scan schedule here — something else runs its scans, about every ${iv}`;
+    out.push(`<div class="notice" role="status">
+      <strong>The newest scan is ${age} old.</strong>
+      ${how}, so anything past ${fmtSpan(f.stale_after_s)} means a scan has been missed.
+      ${f.scanning ? 'One is running right now.' : ''}
+      ${f.backed_off ? `<div class="detail">duTime widened the interval to ${iv} on its own
+        because scans were taking longer than the ${fmtSpan(f.configured_interval_s)} configured.</div>` : ''}
+    </div>`);
+  }
+
+  // A scan that could not read part of the tree reports a total that is too
+  // low, and a shortfall that is never mentioned is indistinguishable from a
+  // real shrink — the one confusion this tool exists to prevent.
+  if (o.scan_status === 'partial') {
+    out.push(`<div class="notice" role="status">
+      <strong>This scan is incomplete.</strong> Some paths could not be read, so
+      every total below is lower than the truth. Growth trends are still
+      meaningful when the same paths fail each time.
+      ${o.scan_error ? `<div class="detail">${escapeHtml(o.scan_error)}</div>` : ''}
+      <div class="detail">${permissionAdvice(o)}</div>
+    </div>`);
+  }
+  return out.join('');
 }
 
 function forecastTile(f) {
@@ -687,6 +782,29 @@ function fmtMs(ms) {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 60000 ? 2 : 1)} s`;
 }
 
+
+/** Free space where the database lives, and whether the reserve is still there.
+ *
+ * Two facts that only mean something together: 200 MB free with the reserve
+ * held is healthy, and 8 MB free with the reserve spent means duTime has
+ * already used its one rescue and the next scan will be dropped.
+ */
+function diskTile(sv) {
+  const fs = sv.db_fs, b = sv.ballast || {};
+  if (!fs) return { k: 'Database filesystem', v: '—', m: 'not reported' };
+  const reserve = b.configured_bytes || 0;
+  const low = fs.avail_bytes < Math.max(reserve, 16 << 20);
+  const state = !reserve ? 'no reserve configured'
+    : b.held ? `${fmtSize(reserve)} reserve held`
+      : `${fmtSize(reserve)} reserve spent`;
+  return {
+    k: 'Database filesystem',
+    v: `${fmtSize(fs.avail_bytes)} free`,
+    m: `of ${fmtSize(fs.total_bytes)} · ${state}`,
+    cls: low || (reserve && !b.held) ? 'warn' : '',
+  };
+}
+
 /** The operator view: what this server is, and what the scanner is doing.
  *
  * Polls while it is on screen. "Is a scan running" is the question this page
@@ -712,6 +830,11 @@ async function loadDiagnostics() {
       k: 'Database', v: fmtSize(sv.db_bytes),
       m: `${fmtSize(sv.wal_bytes)} write-ahead log`,
     },
+    // Headroom where the database lives, which is not necessarily any
+    // tracked root's filesystem. If this one fills, duTime stops being able
+    // to record anything — and without the reserve, stops being able to open
+    // the database even to read what it already has.
+    diskTile(sv),
     {
       k: 'Snapshot cache', v: `${sv.cache.snapshots} / ${sv.cache.max_snapshots}`,
       m: `${fmtSize(sv.cache.bytes)} of ${fmtSize(sv.cache.budget_bytes)}`,
@@ -721,7 +844,7 @@ async function loadDiagnostics() {
     <div class="tile">
       <div class="k">${t.k}</div>
       <div class="v">${escapeHtml(String(t.v))}</div>
-      <div class="m">${t.m}</div>
+      <div class="m${t.cls ? ' ' + t.cls : ''}">${t.m}</div>
     </div>`).join('');
 
   // Only worth saying when some root is actually protected. On a server
@@ -1262,7 +1385,7 @@ async function loadListing() {
   // parent's numbers go in the tooltip, where they inform without competing.
   const up = d.parent
     ? `<tr class="updir clickable" data-path="${escapeHtml(d.parent.path.name)}" tabindex="0"
-           title="Up to ${escapeHtml(d.parent.path.name)} \u2014 ${fmtSize(d.parent.size)}">
+           title="Up to ${escapeHtml(d.parent.path.name)} — ${fmtSize(d.parent.size)}">
          <td class="name">
            <span class="ico">\u{21B0}</span>..<span class="upname">${escapeHtml(d.parent.name)}</span>
          </td>

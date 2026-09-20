@@ -34,6 +34,7 @@ existed.*
 **Going deeper**
 - [Troubleshooting](#troubleshooting)
   - [The diagnostics page](#the-diagnostics-page) — scans in flight, schedules, failures
+  - [The dashboard says the numbers have stopped moving](#the-dashboard-says-the-numbers-have-stopped-moving) — staleness, and what a full disk does
   - [The service is running but the page just spins](#the-service-is-running-but-the-page-just-spins)
   - [A very large root is slow to open](#a-very-large-root-is-slow-to-open)
   - [A scan is running and the UI feels slow](#a-scan-is-running-and-the-ui-feels-slow)
@@ -470,6 +471,57 @@ It respects protected roots exactly as the rest of the API does. Without the
 token you get the server's own figures and the unprotected roots; a protected
 root contributes nothing — not its path, not its schedule, not why its scans
 failed — and the page says how many roots it is not showing you.
+
+### The dashboard says the numbers have stopped moving
+
+The Overview says so itself, at the top of the page, before you read a number
+off it. Three things put a banner there.
+
+**"The newest scan is N old."** The threshold is this root's own interval plus
+how long its last walk took, so an hourly root is late after about an hour and
+a weekly one is not late until the following week — a fixed number would be
+either useless on one or permanently wrong on the other. If duTime widened the
+interval itself because scans were overrunning, the banner says that too.
+A root scanned from cron rather than by the daemon has no configured interval
+here, so the cadence is read off its own scan history instead.
+
+**"The last N scans failed."** The error is shown verbatim. The count is
+consecutive failures, not the lifetime total, so it clears the moment a scan
+succeeds.
+
+**"duTime cannot record new scans: the disk holding its own database is
+full."** This one is worth explaining, because the failure is quieter than it
+sounds. When a filesystem reaches zero bytes free, SQLite cannot open a
+database on it — not to write, and *not to read either*, because WAL mode has
+to create and size a `-shm` index first. Measured on a filesystem filled to
+exactly zero:
+
+```text
+free       dutime serve / scan / scans / doctor
+0          SQLITE_IOERR_SHMSIZE — cannot even open to read
+64 KiB     commits
+256 KiB    commits
+```
+
+So a daemon that was already running keeps serving the dashboard perfectly
+well — its index is already mapped, and reads allocate nothing — but anything
+that *starts* during the incident gets an exit code instead of an answer.
+Reboot the machine while the disk is full and the one tool that could say what
+filled it will not run.
+
+duTime therefore keeps 8 MiB of useless bytes in `dutime.db.ballast`, beside
+the database and so necessarily on the same filesystem, and deletes them on
+the first read or write that fails for want of space. That buys back the room
+to commit the scan that explains the fill, to open the database, and to start
+the service. It is sized to survive one incident, not to keep running
+indefinitely on a full disk: it is spent loudly, and re-reserved on its own
+once there is comfortably room again. `ballast_bytes = 0` turns it off.
+
+Nothing needs restarting. Free space on that filesystem and the next scheduled
+scan commits normally. The diagnostics page carries a **Database filesystem**
+tile showing the headroom and whether the reserve is still held — which is not
+the same question as any tracked root's free space, since the database can
+live on a filesystem duTime does not track at all.
 
 ### The service is running but the page just spins
 

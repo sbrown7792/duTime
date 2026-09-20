@@ -938,3 +938,38 @@ async fn a_deletion_outside_the_window_is_not_listed() {
     // It existed when the window opened, so it shows as a real loss.
     assert!(gone[0]["delta"].as_i64().unwrap() <= -(40 << 20), "{}", gone[0]);
 }
+
+/// The Overview has to carry enough for the page to warn before anyone reads
+/// a number off it: how old the newest scan is, what cadence to judge that
+/// against, and whether the filesystem holding the database has room to
+/// record the next one.
+///
+/// The fixture's clock advances an hour per snapshot, so its scans look like
+/// an hourly root that stopped several hours ago — which is exactly the shape
+/// the banner exists for.
+#[tokio::test]
+async fn the_overview_reports_how_fresh_it_is() {
+    let mut f = Fixture::new();
+    for i in 0..6 {
+        f.write("data/f.bin", (4 << 20) + (i << 20));
+        f.snapshot();
+    }
+    let (state, _root) = f.finish();
+
+    let o = get(&state, "/api/v1/overview").await;
+    let fr = &o["freshness"];
+
+    // No scheduler owns this root in a test, so the cadence has to come from
+    // the scans themselves — the same path a cron-driven deployment takes.
+    assert_eq!(fr["known"], serde_json::json!(true), "{o}");
+    assert_eq!(fr["interval_source"], serde_json::json!("observed"), "{fr}");
+    assert_eq!(fr["interval_s"], serde_json::json!(3600), "{fr}");
+    assert!(fr["stale"].as_bool().unwrap(), "hours-old fixture scans should read as stale: {fr}");
+    assert!(fr["age_s"].as_i64().unwrap() > 3600, "{fr}");
+    assert_eq!(fr["consecutive_failures"], serde_json::json!(0), "{fr}");
+
+    // Free space where the database lives, which the page needs to tell
+    // "duTime cannot write" apart from "nothing has changed".
+    let db = &o["db"];
+    assert!(db["free_bytes"].is_i64() || db["free_bytes"].is_null(), "{db}");
+}

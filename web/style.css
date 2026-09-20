@@ -226,10 +226,22 @@ figcaption { margin-bottom: 14px; }
   line-height: 1.5;
 }
 .notice strong { color: var(--text-primary); }
+/* A failure that stops duTime recording, as opposed to one that only makes a
+   number less trustworthy. Kept to a border and a tint rather than a coloured
+   panel: this sits directly above the figures it is warning about, and a block
+   of red there competes with the charts instead of framing them. */
+.notice.critical {
+  border-left-color: var(--critical);
+  background: color-mix(in srgb, var(--critical) 8%, var(--surface-1));
+}
 .notice .detail {
   margin-top: 5px;
   font-size: 12px;
-  color: var(--text-muted);
+  /* Secondary rather than muted. Muted is calibrated against the plain page
+     surface; on the notice's tinted background it measures 3.1:1 in light
+     mode, and this is where a notice puts the sentence saying what to do
+     about it. The size drop carries the hierarchy instead. */
+  color: var(--text-secondary);
   word-break: break-word;
 }
 

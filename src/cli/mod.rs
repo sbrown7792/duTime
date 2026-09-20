@@ -669,6 +669,51 @@ fn cmd_doctor(db_path: &Path, cfg: &crate::config::Config, network: bool) -> Res
     println!("{:<28} {events}", "size_event rows");
     println!("{:<28} {paths} ({live} live)", "path rows");
 
+    // Headroom where the database lives. Not the same question as any
+    // tracked root's free space, and the one that decides whether duTime can
+    // still record — or even open — anything at all.
+    let dir = db_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let held = crate::store::ballast::Ballast::beside(db_path, cfg.ballast_bytes).held();
+    if let Some((total, _, avail)) = crate::store::commit::statvfs(dir) {
+        println!(
+            "{:<28} {} free of {}",
+            "database filesystem",
+            ByteSize(avail as u64),
+            ByteSize(total as u64)
+        );
+        println!(
+            "{:<28} {}",
+            "reserved space",
+            if cfg.ballast_bytes == 0 {
+                "none configured".to_string()
+            } else if held {
+                format!("{} held", ByteSize(cfg.ballast_bytes))
+            } else {
+                // Not a fault by itself: only `dutime serve` takes the
+                // reserve, so a database that has only ever been scanned from
+                // the command line has never had one.
+                format!("{} configured, not currently held", ByteSize(cfg.ballast_bytes))
+            }
+        );
+        // The combination worth failing on: too little room left to commit a
+        // scan, and — if the reserve is gone too — nothing left to free to
+        // get that room back.
+        let floor = cfg.ballast_bytes.max(16 << 20) as i64;
+        if avail < floor {
+            println!(
+                "  only {} free where the database lives. Below roughly {}, duTime cannot\n  record scans; at zero it cannot open the database even to read.{}",
+                ByteSize(avail as u64),
+                ByteSize(floor as u64),
+                if held {
+                    " The reserve is still there to spend."
+                } else {
+                    " There is no reserve left to spend."
+                }
+            );
+            problems += 1;
+        }
+    }
+
     if problems == 0 {
         println!("\nno problems found");
         Ok(())

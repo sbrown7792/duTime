@@ -61,8 +61,19 @@ pub struct RootActivity {
     pub last_walk_ms: Option<i64>,
     /// Why the last attempt failed, if it did. Cleared by a success.
     pub last_error: Option<String>,
+    /// Was that failure a full disk? Decided from the error itself rather
+    /// than by matching on its text, and kept separate because it is the one
+    /// failure the dashboard can give a specific instruction for.
+    pub last_error_disk_full: bool,
     pub scans_completed: u64,
     pub scans_failed: u64,
+    /// Failures since the last success, as opposed to the lifetime total.
+    ///
+    /// The distinction matters to anything that asks "is this broken *now*":
+    /// a root that failed twice last week and is healthy today has
+    /// `scans_failed == 2` forever, and a banner built on that number never
+    /// goes away.
+    pub consecutive_failures: u64,
 }
 
 pub struct AppState {
@@ -83,6 +94,8 @@ pub struct AppState {
     activity: Mutex<std::collections::HashMap<PathBuf, RootActivity>>,
     /// When this process started, for uptime.
     started_at: i64,
+    /// Size of the disk reserve held beside the database; 0 when disabled.
+    ballast_bytes: u64,
 }
 
 /// A tiny checkout pool. Not worth a dependency: this is the whole thing.
@@ -148,6 +161,7 @@ impl AppState {
             activity: Mutex::new(std::collections::HashMap::new()),
             started_at: crate::cli::now(),
             db_path: PathBuf::new(),
+            ballast_bytes: 0,
         }
     }
 
@@ -170,6 +184,7 @@ impl AppState {
             activity: Mutex::new(std::collections::HashMap::new()),
             started_at: crate::cli::now(),
             db_path: path,
+            ballast_bytes: 0,
         })
     }
 
@@ -249,6 +264,12 @@ impl AppState {
         self.protected = protected;
     }
 
+    /// Tell the state how much disk the daemon reserved, so diagnostics can
+    /// report whether the reserve is still held or has been spent.
+    pub fn set_ballast(&mut self, bytes: u64) {
+        self.ballast_bytes = bytes;
+    }
+
     pub fn is_protected(&self, root: RootId) -> bool {
         self.protected.contains(&root)
     }
@@ -298,6 +319,39 @@ impl AppState {
     /// file is how much history has accumulated, while a large WAL means a
     /// checkpoint is overdue — normal during a commit, worth noticing if it
     /// stays that way.
+    /// The reserve beside the database: how big, and is it still there.
+    ///
+    /// "Spent" is the interesting state and the reason this is reported at
+    /// all — it means a write hit a full disk and this is why it still
+    /// succeeded.
+    pub fn ballast(&self) -> serde_json::Value {
+        if self.db_path.as_os_str().is_empty() || self.ballast_bytes == 0 {
+            return serde_json::json!({ "configured_bytes": self.ballast_bytes, "held": false });
+        }
+        let b = crate::store::ballast::Ballast::beside(&self.db_path, self.ballast_bytes);
+        serde_json::json!({
+            "configured_bytes": self.ballast_bytes,
+            "held": b.held(),
+            "path": b.path().display().to_string(),
+        })
+    }
+
+    /// Free space on the filesystem holding the database.
+    ///
+    /// Not the same question as a tracked root's free space: the database can
+    /// be on a different filesystem entirely, and it is *this* one running out
+    /// that stops duTime recording anything.
+    pub fn db_free(&self) -> Option<(i64, i64, i64)> {
+        if self.db_path.as_os_str().is_empty() {
+            return None;
+        }
+        let dir = match self.db_path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        crate::store::commit::statvfs(dir)
+    }
+
     pub fn db_bytes(&self) -> (u64, u64) {
         if self.db_path.as_os_str().is_empty() {
             return (0, 0);

@@ -28,6 +28,13 @@ pub struct Config {
     /// Turn it on to answer the question that matters when the page will not
     /// load: do requests reach us at all?
     pub access_log: bool,
+    /// Bytes of disk to hold in reserve beside the database, freed
+    /// automatically when the filesystem fills.
+    ///
+    /// A database on a filesystem with no free space cannot be opened even to
+    /// read, so without this a full disk locks you out of the history that
+    /// says what filled it. Set to 0 to keep no reserve.
+    pub ballast_bytes: u64,
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(rename = "root")]
@@ -128,6 +135,7 @@ impl Default for Config {
             checkpoint_every_scans: 288,
             checkpoint_min_bytes: 1 << 20,
             access_log: false,
+            ballast_bytes: crate::store::ballast::DEFAULT_BALLAST_BYTES,
             auth: AuthConfig::default(),
             roots: Vec::new(),
         }
@@ -183,6 +191,9 @@ impl Config {
         if let Ok(v) = std::env::var("DUTIME_ACCESS_LOG") {
             cfg.access_log = !matches!(v.as_str(), "" | "0" | "false" | "no");
         }
+        if let Ok(v) = std::env::var("DUTIME_BALLAST_BYTES") {
+            cfg.ballast_bytes = v.parse().context("DUTIME_BALLAST_BYTES is not a byte count")?;
+        }
 
         if cfg.roots.is_empty() {
             // Nothing configured: track the user's home directory, which is
@@ -225,6 +236,16 @@ listen = "127.0.0.1:8471"
 # the page will not load, since it separates "requests never arrive" from
 # "requests arrive and something is slow".
 # access_log = false
+
+# Disk to hold in reserve beside the database, in bytes. 8 MiB by default.
+#
+# When a filesystem reaches zero bytes free, SQLite cannot open the database
+# on it -- not even to read, because WAL mode must size a `-shm` index first.
+# That is exactly when you want duTime, so it keeps a reserve here and frees
+# it on the first write that fails, which buys back the space to record the
+# scan that explains the fill and to let the service start. It re-reserves
+# itself once there is room again. Set to 0 to keep no reserve.
+# ballast_bytes = 8388608
 
 # A bearer token, required to view any root marked `protected = true` below.
 # Generate one with:  sudo dutime token --write /etc/dutime/token

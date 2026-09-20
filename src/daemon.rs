@@ -141,6 +141,8 @@ impl Scheduler {
                     a.running_since = None;
                     a.last_walk_ms = Some(took);
                     a.last_error = None;
+                    a.last_error_disk_full = false;
+                    a.consecutive_failures = 0;
                     a.scans_completed += 1;
                 });
                 true
@@ -149,11 +151,14 @@ impl Scheduler {
                 tracing::error!(root = %root.path.display(), "scan failed: {e:#}");
                 // Kept verbatim: a diagnostics page that says a scan failed
                 // without saying why sends you to the journal anyway.
+                let full = crate::store::ballast::is_disk_full(&e);
                 self.state.note_activity(key, |a| {
                     a.running_since = None;
                     a.last_walk_ms = Some(took);
                     a.last_error = Some(format!("{e:#}"));
+                    a.last_error_disk_full = full;
                     a.scans_failed += 1;
+                    a.consecutive_failures += 1;
                 });
                 false
             }
@@ -210,19 +215,33 @@ impl Scheduler {
         let n_dirs = r.stats.n_dirs;
 
         let state = self.state.clone();
+        let db_path = self.cfg.db.clone();
         let canon = opts.root.canonicalize().unwrap_or(opts.root.clone());
         let cops = CommitOptions {
             checkpoint_every_scans: self.cfg.checkpoint_every_scans,
             checkpoint_min_bytes: self.cfg.checkpoint_min_bytes,
         };
+        // The commit that matters most is the one taken as the disk fills,
+        // and that is the one with no room to be written. Spending the
+        // reserve buys it back — see `store::ballast`.
+        let ballast =
+            crate::store::ballast::Ballast::beside(&self.cfg.db, self.cfg.ballast_bytes);
         let stats = tokio::task::spawn_blocking(move || {
             let mut store = state.store.lock().unwrap();
             let root_id = store.ensure_root(&canon)?;
-            commit_scan(
-                &mut store, root_id, &canon, &r.tree, &roll, &r.stats, started_at, walk_ms, &cops,
-            )
+            crate::store::ballast::with_rescue(&db_path, "committing a scan", || {
+                commit_scan(
+                    &mut store, root_id, &canon, &r.tree, &roll, &r.stats, started_at, walk_ms,
+                    &cops,
+                )
+            })
         })
         .await??;
+        // Re-arm for next time. `ensure` declines while the disk is still
+        // nearly full, so this cannot be what keeps it full.
+        if let Err(e) = ballast.ensure() {
+            tracing::debug!("could not re-reserve disk space: {e:#}");
+        }
 
         tracing::info!(
             root = %root.path.display(),
@@ -305,6 +324,15 @@ pub async fn serve(cfg: Config) -> Result<()> {
     // A writer plus a pool of readers, so the web UI never queues behind the
     // scanner's commit.
     let mut state = AppState::open(&cfg.db)?;
+
+    // Take the disk reserve before the first scan, so the protection is in
+    // place from the moment the service is up rather than from its first
+    // successful commit an interval later.
+    let ballast = crate::store::ballast::Ballast::beside(&cfg.db, cfg.ballast_bytes);
+    if let Err(e) = ballast.ensure() {
+        tracing::warn!("could not reserve disk space beside the database: {e:#}");
+    }
+    state.set_ballast(cfg.ballast_bytes);
 
     // Roots get their ids on first sight, and the access policy is keyed by
     // id, so registration has to happen before the policy is installed.

@@ -53,3 +53,52 @@ being checkable matters more than being tidy:
 Where duTime deviates, it does so on purpose: hardlink de-duplication credits
 the lowest-sorting path rather than whichever link the walk reached first, so
 two scans of an unchanged tree agree instead of inventing growth.
+
+## Surviving the disk it is watching
+
+duTime exists to answer "what filled this disk", which means the disk being
+full is its working condition, not an edge case. SQLite does not take that
+view. On a filesystem with zero bytes free it cannot open a database at all,
+because WAL mode has to create and size a 32 KiB `-shm` index before it can
+read a row. Measured against a 1.7 MB database of 11,499 entities, on a
+filesystem filled to exactly zero:
+
+| free | `dutime serve` / `scan` / `scans` / `doctor` |
+|---|---|
+| 0 | `SQLITE_IOERR_SHMSIZE` — cannot open, even read-only |
+| 64 KiB | commits |
+| 256 KiB | commits |
+
+The split that matters is between a process that is already running and one
+that is not. A live daemon is unaffected: its `-shm` is mapped, WAL reads
+allocate nothing, and every API endpoint keeps answering with the disk at zero.
+Its commits fail with `SQLITE_FULL`, the scan is discarded rather than recorded
+as a cliff, and it recovers on its own the moment space returns. A process that
+*starts* during the incident gets an exit code.
+
+That asymmetry is luck, not design, so duTime does not rely on it. It reserves
+8 MiB in `dutime.db.ballast` beside the database — the same filesystem, by
+construction — and frees it on the first operation that fails for want of
+space, whether that is a commit or an open. One retry, never a loop: if the
+write fails again the disk is full in a way 8 MiB was never going to fix, and
+the caller needs the error rather than another attempt.
+
+Three details are load-bearing:
+
+- **The reserve must hold real blocks.** `fallocate`, falling back to writing
+  zeros where the filesystem does not support it. A sparse file of the right
+  length reserves nothing, and would fail silently in exactly the situation it
+  was created for.
+- **"Disk full" is matched more broadly than `SQLITE_FULL`.** The failure this
+  was built for reports `SQLITE_IOERR_SHMSIZE`, because it happens while sizing
+  the index rather than while writing a page. Matching only the obvious code
+  would miss the only case that cannot be recovered any other way.
+- **Re-reserving is refused while the disk is still nearly full.** Taking the
+  last 8 MiB back from a filesystem with 9 MiB free would be this mechanism
+  causing the incident it exists to survive. It re-arms once there is room for
+  the reserve twice over.
+
+The history itself is rarely the casualty. A disk fills *across* the preceding
+scans, every one of which committed while there was still space, so what
+explains the fill is already recorded before anything fails. What the reserve
+protects is the ability to go and read it.
